@@ -7,12 +7,12 @@ import {
   XCircle,
   CaretRight,
   Eye,
-  Code,
   Terminal,
   MagnifyingGlass,
   Timer,
   Copy,
   Check,
+  Plug,
 } from "@phosphor-icons/react"
 import { AnimatePresence, motion } from "framer-motion"
 import { memo, useEffect, useMemo, useState } from "react"
@@ -48,7 +48,7 @@ const CUA_MARKDOWN_COMPONENTS: Partial<Components> = {
     // Block code: plain <code>, parent's [&_pre] selectors style the wrapper.
     return (
       <code
-        className={cn("font-mono text-[12px] text-foreground/85", className)}
+        className={cn("font-mono text-[12px] text-foreground/80", className)}
         {...props}
       >
         {children}
@@ -81,6 +81,14 @@ type SectionType =
   | "code-agent-thought"
   | "code-agent-result"
   | "code-agent-done"
+  | "composio-agent-thought"
+  | "composio-agent-search"
+  | "composio-agent-result"
+  | "composio-agent-done"
+  | "composio-agent-reauth"
+  | "composio-agent-breaker"
+  | "composio-agent-cancelled"
+  | "composio-agent-deadline"
   | "action-result"
   | "status"
   | "search-results"
@@ -109,6 +117,12 @@ type TopLevelItem =
   | { kind: "code-agent-result"; content: string; step: string }
   | { kind: "code-agent-done"; content: string; step: string }
   | { kind: "code-agent-summary"; content: string }
+  | { kind: "composio-agent-thought"; content: string; step: string }
+  | { kind: "composio-agent-search"; content: string; step: string }
+  | { kind: "composio-agent-result"; content: string; step: string; toolkit: string; slug: string; status: string }
+  | { kind: "composio-agent-done"; content: string }
+  | { kind: "composio-agent-reauth"; content: string; toolkit: string }
+  | { kind: "composio-agent-note"; content: string }
   | { kind: "search-results"; query: string; content: string }
   | { kind: "awaiting-human"; reason: string; machineId: string }
   | { kind: "awaiting-human-timeout"; content: string }
@@ -245,6 +259,28 @@ function buildTopLevel(sections: ParsedSection[]): TopLevelItem[] {
     } else if (s.type === "code-agent-summary") {
       flushStep()
       items.push({ kind: "code-agent-summary", content: s.content })
+    } else if (s.type === "composio-agent-thought") {
+      flushStep()
+      items.push({ kind: "composio-agent-thought", content: s.content, step: s.attrs.step || "" })
+    } else if (s.type === "composio-agent-search") {
+      flushStep()
+      items.push({ kind: "composio-agent-search", content: s.content, step: s.attrs.step || "" })
+    } else if (s.type === "composio-agent-result") {
+      flushStep()
+      items.push({ kind: "composio-agent-result", content: s.content, step: s.attrs.step || "", toolkit: s.attrs.toolkit || "", slug: s.attrs.slug || "", status: s.attrs.status || "success" })
+    } else if (s.type === "composio-agent-done") {
+      flushStep()
+      items.push({ kind: "composio-agent-done", content: s.content })
+    } else if (s.type === "composio-agent-reauth") {
+      flushStep()
+      items.push({ kind: "composio-agent-reauth", content: s.content, toolkit: s.attrs.toolkit || "" })
+    } else if (
+      s.type === "composio-agent-breaker" ||
+      s.type === "composio-agent-cancelled" ||
+      s.type === "composio-agent-deadline"
+    ) {
+      flushStep()
+      items.push({ kind: "composio-agent-note", content: s.content })
     } else if (s.type === "search-results") {
       flushStep()
       items.push({ kind: "search-results", query: s.attrs.query || "", content: s.content })
@@ -445,7 +481,7 @@ function DetailRow({
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="group/detail flex items-center gap-1.5 py-1 text-[12.5px] text-muted-foreground/50 hover:text-muted-foreground/80 transition-colors"
+        className="group/detail flex items-center gap-1.5 py-0.5 text-[12px] font-medium tracking-tight text-foreground/40 hover:text-foreground/70 transition-colors"
       >
         <CaretRight
           weight="bold"
@@ -454,7 +490,7 @@ function DetailRow({
             open && "rotate-90"
           )}
         />
-        <Icon className="size-3 shrink-0 opacity-50 group-hover/detail:opacity-80 transition-opacity" />
+        <Icon className="size-3 shrink-0 opacity-70 group-hover/detail:opacity-100 transition-opacity" />
         <span>{label}</span>
       </button>
       <AnimatePresence initial={false}>
@@ -466,7 +502,7 @@ function DetailRow({
             transition={{ duration: 0.15, ease: "easeOut" }}
             className="overflow-hidden"
           >
-            <div className="ml-[22px] pb-2 text-[13px] leading-relaxed text-muted-foreground/80">
+            <div className="ml-[22px] pb-2 pt-0.5 text-[14px] leading-relaxed text-foreground/60">
               {children}
             </div>
           </motion.div>
@@ -481,11 +517,112 @@ function StatusDot({ status }: { status: string }) {
     <span
       className={cn(
         "inline-block size-[5px] rounded-full shrink-0",
-        status === "success" && "bg-emerald-400 dark:bg-emerald-500/70",
-        status === "error" && "bg-red-400 dark:bg-red-500/70",
-        status !== "success" && status !== "error" && "bg-foreground/[0.14] dark:bg-foreground/[0.10]",
+        status === "success" && "bg-emerald-500",
+        status === "error" && "bg-red-500",
+        status !== "success" && status !== "error" && "bg-foreground/20",
       )}
     />
+  )
+}
+
+// ── Unified content primitives (the redesign system) ──
+//
+// Every section's CONTENT (everything to the RIGHT of the timeline rail) is
+// built from this tiny vocabulary so all ~15 section types share one type
+// scale, one color ladder, and one set of surfaces. The rail / dots / shimmer
+// are deliberately untouched — they are the single signature element.
+//
+//   • prose  = text-[14px] leading-relaxed   (tier by opacity: /90 /60 /40)
+//   • meta   = text-[12px]                    (labels, chips, status words)
+//   • mono   = font-mono text-[12.5px]        (code surfaces only, /80)
+//   • COLOR is reserved for STATUS (emerald success / red error / amber
+//     attention). Everything else lives on the neutral foreground opacity
+//     ladder, so the eye reads color as "an outcome happened", nothing else.
+
+type Tone = "success" | "error" | "attention"
+
+const TONE_TEXT: Record<Tone, string> = {
+  success: "text-emerald-500",
+  error: "text-red-500",
+  attention: "text-amber-500",
+}
+const TONE_MOMENT: Record<Tone, string> = {
+  success: "ring-emerald-500/20 bg-emerald-500/[0.05] text-emerald-600 dark:text-emerald-400",
+  error: "ring-red-500/20 bg-red-500/[0.05] text-red-600 dark:text-red-400",
+  attention: "ring-amber-500/20 bg-amber-500/[0.05] text-amber-600 dark:text-amber-400",
+}
+
+/** Faint caption/header sitting above a block (e.g. "Session summary"). */
+function Eyebrow({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="mb-1 text-[12px] font-medium tracking-tight text-foreground/40">
+      {children}
+    </div>
+  )
+}
+
+/** The single delegation tag. Neutral by design — color is for status only. */
+function Chip({ icon, children }: { icon: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <span className="inline-flex items-center gap-1.5 shrink-0 rounded-full px-2 py-0.5 text-[12px] font-medium text-foreground/70 ring-1 ring-inset ring-foreground/10 bg-foreground/[0.04]">
+      {icon}
+      {children}
+    </span>
+  )
+}
+
+/** Soft tinted container for terminal/important states — one radius, one ring
+ *  weight, one padding everywhere (status, reauth, awaiting-human lifecycle). */
+function MomentPill({
+  tone,
+  icon,
+  children,
+}: {
+  tone: Tone
+  icon?: React.ReactNode
+  children: React.ReactNode
+}) {
+  return (
+    <div
+      className={cn(
+        "inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-[12px] font-medium ring-1 ring-inset",
+        TONE_MOMENT[tone],
+      )}
+    >
+      {icon}
+      <span>{children}</span>
+    </div>
+  )
+}
+
+/** Bare status line (no container) — a tone dot + text. Used for the quiet
+ *  sub-agent "done" notes so they read as a soft beat, not a banner. */
+function StatusLine({ tone, children }: { tone: Tone; children: React.ReactNode }) {
+  return (
+    <span className={cn("inline-flex items-center gap-1.5 text-[12px]", TONE_TEXT[tone])}>
+      <StatusDot status={tone === "attention" ? "pending" : tone} />
+      {children}
+    </span>
+  )
+}
+
+/** The single code/console surface — shared by the running command (thought)
+ *  and its output (result). Hairline ring, subtle fill, mono body, hover copy. */
+function CodeSurface({ text, error = false }: { text: string; error?: boolean }) {
+  return (
+    <div className="group/code relative overflow-hidden rounded-lg ring-1 ring-inset ring-foreground/[0.06] bg-foreground/[0.02]">
+      <div className="absolute right-1.5 top-1.5 z-[1] opacity-0 transition-opacity duration-150 group-hover/code:opacity-100">
+        <CopyButton text={text} />
+      </div>
+      <pre
+        className={cn(
+          "m-0 px-3.5 pr-10 py-3 font-mono text-[12.5px] leading-[1.6] tabular-nums whitespace-pre-wrap break-words min-w-0 overflow-hidden",
+          error ? "text-red-500/90 dark:text-red-400/90" : "text-foreground/80",
+        )}
+      >
+        {text}
+      </pre>
+    </div>
   )
 }
 
@@ -499,6 +636,97 @@ function extractCodeAgentTask(code: string): string | null {
   return match[1].replace(/\\n/g, " ").trim()
 }
 
+/**
+ * Composio (Integration) action parser — mirrors the backend's
+ * `_describe_agent_action` handler for composio_* methods. The backend
+ * already produces a humanized next-action label ("Search the OUTLOOK
+ * integration for 'send email'"); this parser only needs to surface the
+ * TOOLKIT so the pill can show that integration's logo. The natural-
+ * language label already conveys the query/action verbatim, so we don't
+ * re-render it as a noisy detail row.
+ *
+ * Returns null when the code isn't a composio_* call. When it is:
+ *   - method:   "search" | "call" | "actions"
+ *   - toolkit:  uppercase toolkit slug (best-effort, may be "" for
+ *               toolkit-less composio_search calls).
+ */
+type IntegrationKind = "search" | "call" | "actions"
+interface IntegrationAction {
+  method: IntegrationKind
+  toolkit: string
+}
+
+function extractIntegrationAction(code: string): IntegrationAction | null {
+  // composio_search(query?, toolkits=[...], limit=N)
+  if (/agent\.composio_search\s*\(/.test(code)) {
+    let toolkit = ""
+    const tk = code.match(/toolkits\s*=\s*\[\s*([^\]]*)\]/)
+    if (tk) {
+      // Pull the FIRST entry; the pill renders one toolkit slug. If
+      // multiple toolkits are searched, the backend's natural-language
+      // label already enumerates them in the line above the pill.
+      const first = tk[1].match(/["']([^"']+)["']/)
+      if (first) toolkit = first[1].toUpperCase()
+    }
+    return { method: "search", toolkit }
+  }
+
+  // composio_call("TOOLKIT_ACTION", ...kwargs) — toolkit is the prefix
+  // segment before the first underscore.
+  const callMatch = code.match(/agent\.composio_call\s*\(\s*["']([A-Z0-9_]+)["']/)
+  if (callMatch) {
+    const toolkit = callMatch[1].split("_")[0] || ""
+    return { method: "call", toolkit }
+  }
+
+  // composio_actions("toolkit", search=?, limit=N)
+  const actionsMatch = code.match(/agent\.composio_actions\s*\(\s*["']([^"']+)["']/)
+  if (actionsMatch) {
+    return { method: "actions", toolkit: actionsMatch[1].toUpperCase() }
+  }
+
+  return null
+}
+
+/**
+ * Compact toolkit logo for the Integration pill.
+ *
+ * Sourced from `https://logos.composio.dev/api/<slug>` — Composio's
+ * public logo CDN, same source that powers the connections page. The
+ * image renders at its natural SVG size inside the pill chip (no tile,
+ * no ring, no forced background) so it sits "relaxed" next to the chip
+ * text the way the Terminal icon sits next to "Code Agent". On 404 /
+ * network error we silently fall back to a Plug glyph — a broken-image
+ * outline never appears.
+ *
+ * Uses a React state flag (rather than `onError` mutating the src
+ * in-place) so a slug change resets the fallback automatically — eg.
+ * a StepCard streaming outlook → gmail won't be permanently locked into
+ * the plug icon.
+ */
+function IntegrationLogo({ toolkit }: { toolkit: string }) {
+  const slug = toolkit.trim().toLowerCase()
+  const [failed, setFailed] = useState(false)
+  useEffect(() => {
+    setFailed(false)
+  }, [slug])
+
+  if (!slug || failed) {
+    return <Plug className="size-2.5 shrink-0" weight="fill" />
+  }
+
+  return (
+    // eslint-disable-next-line @next/next/no-img-element -- 3rd-party CDN,
+    // no Image() optimization benefit for an inline SVG.
+    <img
+      src={`https://logos.composio.dev/api/${slug}`}
+      alt=""
+      className="h-3 w-3 shrink-0 object-contain"
+      onError={() => setFailed(true)}
+    />
+  )
+}
+
 /** Check if grounded action code is an agent function call (code_agent, wait, etc.) */
 function extractAgentAction(code: string): { type: string; label: string; detail?: string } | null {
   // Code agent
@@ -507,6 +735,66 @@ function extractAgentAction(code: string): { type: string; label: string; detail
     return { type: "code-agent", label: "Code Agent", detail: codeAgentTask || undefined }
   }
   return null
+}
+
+/**
+ * Detect the worker's `agent.call_composio(...)` DELEGATION (the post-refactor
+ * entry point — the inline composio_call/search/actions primitives are retired).
+ * Returns the optional narrow-task string the worker passed, or {} for a no-arg
+ * full-task delegation. Returns null when the code isn't a call_composio.
+ */
+function extractComposioDelegation(code: string): { task?: string } | null {
+  const m =
+    code.match(/agent\.call_composio\s*\(\s*(?:task\s*=\s*)?"([\s\S]*?)(?:"\s*[,)])/) ||
+    code.match(/agent\.call_composio\s*\(\s*(?:task\s*=\s*)?'([\s\S]*?)(?:'\s*[,)])/)
+  if (m) return { task: m[1].replace(/\\n/g, " ").trim() || undefined }
+  if (/agent\.call_composio\s*\(/.test(code)) return {}
+  return null
+}
+
+/** "gmail" → "Gmail", "google_drive" → "Google Drive" */
+function humanizeToolkit(toolkit: string): string {
+  return (toolkit || "")
+    .split("_")
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .join(" ")
+}
+
+/** "GMAIL_SEND_EMAIL" + toolkit "gmail" → "Send email" (toolkit prefix dropped, sentence-cased). */
+function humanizeAction(slug: string, toolkit: string): string {
+  if (!slug) return ""
+  let rest = slug
+  const tkUpper = (toolkit || "").toUpperCase()
+  if (tkUpper && rest.toUpperCase().startsWith(tkUpper + "_")) {
+    rest = rest.slice(tkUpper.length + 1)
+  }
+  const words = rest.replace(/_/g, " ").trim().toLowerCase()
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : ""
+}
+
+/**
+ * Timeline marker for Composio sub-agent items — the integration equivalent of
+ * TerminalDot. A small upright tile with a SOLID surface so the (often colored)
+ * brand logo reads cleanly against the timeline. Centered on the rail at +3px
+ * (-left-[8px] + 22/2 = 3).
+ */
+function IntegrationDot({ toolkit }: { toolkit: string }) {
+  return (
+    <div
+      aria-hidden="true"
+      className={cn(
+        "absolute -left-[8px] top-[1px] z-[2]",
+        "flex h-[22px] w-[22px] items-center justify-center rounded-[6px]",
+        // Solid surface (not a translucent tint) so it sits as a distinct object.
+        "bg-white dark:bg-neutral-800",
+        "ring-1 ring-black/[0.06] dark:ring-white/[0.08]",
+        "shadow-[0_1px_2px_rgba(0,0,0,0.08),0_2px_5px_rgba(0,0,0,0.04)]",
+      )}
+    >
+      <IntegrationLogo toolkit={toolkit} />
+    </div>
+  )
 }
 
 function StepCard({
@@ -529,7 +817,25 @@ function StepCard({
       ? "success"
       : "pending"
   const hasScreenshot = !!screenshot
-  const agentAction = step.code ? extractAgentAction(step.code) : null
+  // Integration pill takes precedence over the generic Code Agent pill
+  // because both could match if a future composio_* slug ever overlaps
+  // with the code-agent regex. extractIntegrationAction returns null for
+  // non-composio code, so this is a no-op for all other action types.
+  const integrationAction = step.code ? extractIntegrationAction(step.code) : null
+  const composioDelegation =
+    !integrationAction && step.code ? extractComposioDelegation(step.code) : null
+  const agentAction =
+    !integrationAction && !composioDelegation && step.code ? extractAgentAction(step.code) : null
+  const isDelegation = !!(agentAction || composioDelegation)
+
+  // A delegation's eval returns a no-op `time.sleep(...)`, which the executor
+  // surfaces as a "Waiting about N seconds…" line/badge. Drop it on delegation
+  // steps — the real result comes from the sub-agent's own timeline sections.
+  const isWaitNoop = (s: string) => /^\s*waiting\b[\s\S]*\bseconds?\b/i.test(s)
+  const showAction = actionText && !(isDelegation && isWaitNoop(actionText))
+  const visibleResults = isDelegation
+    ? step.results.filter((r) => !isWaitNoop(r.content))
+    : step.results
 
   return (
     // Bottom padding intentionally omitted — the parent timeline uses a
@@ -542,47 +848,68 @@ function StepCard({
         <PlainDot status={status} />
       )}
 
-      {/* Action — the natural language line (truncated for readability) */}
-      {actionText && (
-        <p className="text-[15px] leading-relaxed text-foreground/90 break-words overflow-hidden">
+      {/* Action — the natural-language line. Canonical timeline prose:
+          14px / leading-relaxed / sans, matched by every other prose line. */}
+      {showAction && (
+        <p className="text-[14px] leading-relaxed text-foreground/90 break-words overflow-hidden">
           {truncateText(actionText, 200)}
         </p>
       )}
 
-      {/* Agent function call pill + prompt card (e.g. code_agent) */}
-      {agentAction && (
-        <div className="mt-1.5 rounded-lg border border-emerald-500/15 dark:border-emerald-400/12 bg-emerald-500/[0.03] dark:bg-emerald-400/[0.03] overflow-hidden">
-          <div className="flex items-center gap-2 px-2.5 py-1.5">
-            <span className="inline-flex items-center gap-1.5 text-[11.5px] leading-none font-medium px-2 py-[3px] rounded-full bg-emerald-500/12 text-emerald-600 dark:text-emerald-400">
-              <Terminal className="size-3 shrink-0" />
-              {agentAction.label}
+      {/* Integration primitive (legacy) — one neutral Chip + a faint verb. */}
+      {integrationAction && (
+        <div className="mt-1 flex items-center gap-2 flex-wrap min-w-0">
+          <Chip icon={<IntegrationLogo toolkit={integrationAction.toolkit} />}>
+            {humanizeToolkit(integrationAction.toolkit) || "Integration"}
+          </Chip>
+          <span className="text-[12px] text-foreground/40">
+            {integrationAction.method === "search" && "search"}
+            {integrationAction.method === "call" && "run"}
+            {integrationAction.method === "actions" && "browse"}
+          </span>
+        </div>
+      )}
+
+      {/* Integration delegation — the one neutral Chip + the (secondary) task.
+          The per-toolkit logo appears later on the result row. */}
+      {composioDelegation && (
+        <div className="mt-1 flex items-center gap-2 flex-wrap min-w-0">
+          <Chip icon={<Plug weight="fill" className="size-3 shrink-0" />}>Integration</Chip>
+          {composioDelegation.task && (
+            <span className="text-[14px] leading-snug text-foreground/60 break-words min-w-0">
+              {truncateText(composioDelegation.task, 140)}
             </span>
-          </div>
-          {agentAction.detail && (
-            <div className="px-3 pb-2.5 -mt-0.5 overflow-hidden">
-              <p className="text-[12.5px] leading-relaxed text-foreground/60 dark:text-foreground/50 break-words">
-                {truncateText(agentAction.detail, 300)}
-              </p>
-            </div>
           )}
         </div>
       )}
 
-      {/* Inline result badges */}
-      {step.results.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1.5 mt-1">
-          {step.results.map((r, j) => (
+      {/* Code-agent delegation — same neutral Chip treatment. */}
+      {agentAction && (
+        <div className="mt-1 flex items-center gap-2 flex-wrap min-w-0">
+          <Chip icon={<Terminal className="size-3 shrink-0" />}>{agentAction.label}</Chip>
+          {agentAction.detail && (
+            <span className="text-[14px] leading-snug text-foreground/60 break-words min-w-0">
+              {truncateText(agentAction.detail, 140)}
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Inline results — bare status rows (no pills): a tone dot + the
+          outcome. Only the dot (and error text) carries color, so a column
+          of successful steps stays calm. Wait no-ops filtered on delegations. */}
+      {visibleResults.length > 0 && (
+        <div className="flex flex-col gap-y-0.5 mt-1">
+          {visibleResults.map((r, j) => (
             <span
               key={j}
               className={cn(
-                "inline-flex items-center gap-1 text-[11px] leading-none px-1.5 py-0.5 rounded-full",
-                r.status === "success" && "text-emerald-600/80 dark:text-emerald-400/70 bg-emerald-500/8",
-                r.status === "error" && "text-red-500/80 dark:text-red-400/70 bg-red-500/8",
-                r.status !== "success" && r.status !== "error" && "text-muted-foreground/50 bg-muted-foreground/5",
+                "inline-flex items-center gap-1.5 text-[12px] min-w-0",
+                r.status === "error" ? "text-red-500" : "text-foreground/60",
               )}
             >
               <StatusDot status={r.status} />
-              {truncateText(r.content, 120)}
+              <span className="break-words min-w-0">{truncateText(r.content, 120)}</span>
             </span>
           ))}
         </div>
@@ -648,102 +975,56 @@ function ItemRenderer({
     case "status": {
       const done = item.status === "completed"
       return (
-        <div className="py-1.5 pl-6">
-          <div className={cn(
-            "inline-flex items-center gap-2 rounded-lg border px-3 py-1.5",
-            done
-              ? "border-emerald-200/60 bg-emerald-500/[0.04] dark:border-emerald-700/40 dark:bg-emerald-400/[0.04]"
-              : "border-red-200/60 bg-red-500/[0.04] dark:border-red-700/40 dark:bg-red-400/[0.04]",
-          )}>
-            {done ? (
-              <CheckCircle className="size-3.5 shrink-0 text-emerald-500" weight="fill" />
-            ) : (
-              <XCircle className="size-3.5 shrink-0 text-red-500" weight="fill" />
-            )}
-            <span className={cn(
-              "text-[13px] font-medium",
-              done ? "text-emerald-700 dark:text-emerald-300" : "text-red-600 dark:text-red-400",
-            )}>
-              {item.content}
-            </span>
-          </div>
+        <div className="pl-6">
+          <MomentPill
+            tone={done ? "success" : "error"}
+            icon={
+              done ? (
+                <CheckCircle className="size-3.5 shrink-0" weight="fill" />
+              ) : (
+                <XCircle className="size-3.5 shrink-0" weight="fill" />
+              )
+            }
+          >
+            {item.content}
+          </MomentPill>
         </div>
       )
     }
 
     case "code-agent-thought": {
-      // The agent's mid-execution reasoning is virtually always a code
-      // command (with the agent's narrative occasionally mixed in).
-      // Rendering through Markdown was the source of the inconsistent
-      // formatting the user reported: Python comments (`# x`) became
-      // <h1> headings, `>` lines became blockquotes, indentation got
-      // collapsed in paragraphs, and stripped fence markers left some
-      // lines as plain prose and others as monospace. We bypass
-      // Markdown entirely and render the whole block as a single
-      // monospace <pre> so every line — code, narrative, comment —
-      // gets the same treatment.
+      // The running command (with the agent's narrative occasionally mixed
+      // in). Markdown is bypassed — it turned Python comments into <h1> and
+      // `>` lines into blockquotes — so the whole block renders in the one
+      // shared CodeSurface, identical to its output below.
       const cleaned = truncateText(stripAgentMarkup(item.content), 3000)
       if (!cleaned) return null
       return (
-        <pre
-          className={cn(
-            "m-0 pl-6 py-1",
-            "font-mono text-[12.5px] leading-[1.65] tabular-nums text-foreground/85",
-            "whitespace-pre-wrap break-words",
-            "min-w-0 overflow-hidden",
-          )}
-        >
-          {cleaned}
-        </pre>
+        <div className="pl-6">
+          <CodeSurface text={cleaned} />
+        </div>
       )
     }
 
     case "code-agent-result": {
-      // Single-card view: a clean two-row card with a contextual header
-      // label + copy button on top and mono content below. The content
-      // is filtered by stripAgentMarkup which removes <answer>/</answer>
-      // tags and ``` fence markers so the user sees clean text. The
-      // card sits behind a TerminalDot timeline marker — the code-step
-      // equivalent of the ScreenshotDot used for visual actions.
+      // The command's output — the SAME CodeSurface as the thought above,
+      // behind a TerminalDot rail marker. Errors tint the body red; no
+      // other chrome distinguishes it.
       const cleaned = stripAgentMarkup(item.content)
       if (!cleaned) return null
       const hasError = /\bError:\s/.test(cleaned)
       return (
-        <div className="relative pl-8 py-1.5">
+        <div className="relative pl-8">
           <TerminalDot />
-          {/* Result card — shadcn-style minimal: hairline border on a
-              subtle muted surface, no title bar, mono body. Copy button
-              floats in the top-right corner, muted at rest and full
-              brightness on hover. Errors are signaled by red body text
-              only — no extra chrome. */}
-          <div className="group/result-card relative overflow-hidden rounded-lg border border-foreground/[0.07] bg-foreground/[0.02]">
-            <div className="absolute right-1.5 top-1.5 opacity-40 transition-opacity duration-150 group-hover/result-card:opacity-100">
-              <CopyButton text={cleaned} />
-            </div>
-            <pre
-              className={cn(
-                // pr-10 reserves room for the floating copy button so
-                // long unbreakable lines never slide under it.
-                "m-0 pl-4 pr-10 py-3 font-mono text-[12px] leading-[1.65] tabular-nums whitespace-pre-wrap break-words",
-                hasError
-                  ? "text-red-500/85 dark:text-red-400/90"
-                  : "text-foreground/85"
-              )}
-            >
-              {cleaned}
-            </pre>
-          </div>
+          <CodeSurface text={cleaned} error={hasError} />
         </div>
       )
     }
 
     case "code-agent-done":
       return (
-        <div className="py-0.5 pl-6">
-          <span className="inline-flex items-center gap-1.5 text-[12px] text-emerald-600/50 dark:text-emerald-400/40">
-            <CheckCircle className="size-3 shrink-0" weight="fill" />
-            {item.content}
-          </span>
+        <div className="pl-6">
+          <StatusLine tone="success">{item.content}</StatusLine>
         </div>
       )
 
@@ -757,36 +1038,34 @@ function ItemRenderer({
       const cleaned = truncateText(stripAgentMarkup(item.content), 5000)
       if (!cleaned) return null
       return (
-        <div className="group/summary relative pl-6 py-2">
-          <div className="absolute right-1 top-2 opacity-40 transition-opacity duration-150 group-hover/summary:opacity-100">
+        <div className="group/summary relative pl-6">
+          <div className="absolute right-1 top-0 opacity-0 transition-opacity duration-150 group-hover/summary:opacity-100">
             <CopyButton text={cleaned} />
           </div>
-          <div className="mb-2">
-            <span className="text-[11.5px] font-medium tracking-tight text-foreground/55">
-              Session Summary
-            </span>
-          </div>
+          <Eyebrow>Session summary</Eyebrow>
           <div
             className={cn(
-              "text-[14px] leading-[1.65] text-foreground/85",
+              "text-[14px] leading-relaxed text-foreground/90",
               // Containment: long unbreakable strings wrap inside the
               // bubble instead of pushing it wider.
               "min-w-0 overflow-hidden break-words",
               "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
               "[&_p]:my-2",
               "[&_strong]:font-semibold [&_strong]:text-foreground",
-              "[&_em]:italic [&_em]:text-foreground/75",
+              "[&_em]:italic [&_em]:text-foreground/60",
               "[&_ul]:my-2 [&_ul]:space-y-0.5 [&_ul]:pl-4",
               "[&_ol]:my-2 [&_ol]:space-y-0.5 [&_ol]:pl-5",
-              "[&_li]:marker:text-foreground/35 [&_li]:leading-[1.55]",
-              "[&_h1]:mt-3 [&_h1]:mb-1.5 [&_h1]:text-[15px] [&_h1]:font-semibold [&_h1]:text-foreground",
-              "[&_h2]:mt-3 [&_h2]:mb-1.5 [&_h2]:text-[14.5px] [&_h2]:font-semibold [&_h2]:text-foreground",
+              "[&_li]:marker:text-foreground/40 [&_li]:leading-relaxed",
+              // Headings collapse to body size + weight — the timeline keeps
+              // a flat type scale; emphasis comes from weight, not size.
+              "[&_h1]:mt-3 [&_h1]:mb-1 [&_h1]:text-[14px] [&_h1]:font-semibold [&_h1]:text-foreground",
+              "[&_h2]:mt-3 [&_h2]:mb-1 [&_h2]:text-[14px] [&_h2]:font-semibold [&_h2]:text-foreground",
               "[&_h3]:mt-2.5 [&_h3]:mb-1 [&_h3]:text-[14px] [&_h3]:font-medium [&_h3]:text-foreground",
-              "[&_pre]:my-2 [&_pre]:rounded-lg [&_pre]:border [&_pre]:border-foreground/[0.06] [&_pre]:!bg-foreground/[0.03] [&_pre]:p-3",
+              "[&_pre]:my-2 [&_pre]:rounded-lg [&_pre]:ring-1 [&_pre]:ring-inset [&_pre]:ring-foreground/[0.06] [&_pre]:!bg-foreground/[0.02] [&_pre]:p-3",
               "[&_pre]:whitespace-pre-wrap [&_pre]:break-words [&_pre]:overflow-x-hidden",
               "[&_code]:break-words",
               "[&_a]:text-foreground [&_a]:underline [&_a]:underline-offset-[3px] [&_a]:decoration-foreground/30 hover:[&_a]:decoration-foreground/60 [&_a]:break-all",
-              "[&_blockquote]:my-2 [&_blockquote]:border-l-2 [&_blockquote]:border-foreground/15 [&_blockquote]:pl-3 [&_blockquote]:text-foreground/70 [&_blockquote]:italic"
+              "[&_blockquote]:my-2 [&_blockquote]:border-l-2 [&_blockquote]:border-foreground/15 [&_blockquote]:pl-3 [&_blockquote]:text-foreground/60 [&_blockquote]:italic"
             )}
           >
             <CuaMarkdown>{cleaned}</CuaMarkdown>
@@ -795,8 +1074,90 @@ function ItemRenderer({
       )
     }
 
+    case "composio-agent-thought": {
+      // Sub-agent reasoning — the secondary prose tier (/60) so the
+      // integration timeline reads as calm progress, not noise.
+      const cleaned = truncateText(stripAgentMarkup(item.content), 600)
+      if (!cleaned) return null
+      return (
+        <p className="pl-6 text-[14px] leading-relaxed text-foreground/60 break-words min-w-0 overflow-hidden">
+          {cleaned}
+        </p>
+      )
+    }
+
+    case "composio-agent-search": {
+      // Candidate-action discovery — folded behind progressive disclosure so
+      // the default timeline stays clean; curious users can expand it.
+      const cleaned = stripAgentMarkup(item.content)
+      if (!cleaned) return null
+      return (
+        <div className="pl-6">
+          <DetailRow icon={MagnifyingGlass} label="Searched connected apps">
+            <CuaMarkdown>{cleaned}</CuaMarkdown>
+          </DetailRow>
+        </div>
+      )
+    }
+
+    case "composio-agent-result": {
+      // Signature element — a single clean line: the integration name + the
+      // humanized action it ran, with a success/error tick. The raw API payload
+      // is intentionally NOT shown (it's noise); the dot carries the live logo.
+      const isError =
+        item.status === "error" || /\bError:\s/.test(stripAgentMarkup(item.content))
+      const toolkitName = humanizeToolkit(item.toolkit)
+      const fn = humanizeAction(item.slug, item.toolkit)
+      const errMsg = isError
+        ? truncateText(stripAgentMarkup(item.content).replace(/^Error:\s*/i, ""), 140)
+        : ""
+      return (
+        <div className="relative pl-8">
+          <IntegrationDot toolkit={item.toolkit} />
+          <div className="flex min-h-[22px] items-center gap-1.5">
+            <span className="text-[14px] leading-snug text-foreground/90">
+              {toolkitName || "Integration"}
+              {fn && <span className="text-foreground/40">{" · "}{fn}</span>}
+            </span>
+            {isError ? (
+              <XCircle className="size-3.5 shrink-0 text-red-500" weight="fill" />
+            ) : (
+              <CheckCircle className="size-3.5 shrink-0 text-emerald-500" weight="fill" />
+            )}
+          </div>
+          {errMsg && (
+            <p className="mt-0.5 text-[12px] leading-relaxed text-red-500 dark:text-red-400 break-words">
+              {errMsg}
+            </p>
+          )}
+        </div>
+      )
+    }
+
+    case "composio-agent-done":
+      return (
+        <div className="pl-6">
+          <StatusLine tone="success">{item.content}</StatusLine>
+        </div>
+      )
+
+    case "composio-agent-reauth":
+      return (
+        <div className="pl-6">
+          <MomentPill tone="attention" icon={<IntegrationLogo toolkit={item.toolkit} />}>
+            {item.content}
+          </MomentPill>
+        </div>
+      )
+
+    case "composio-agent-note": {
+      const cleaned = item.content.trim()
+      if (!cleaned) return null
+      return <p className="pl-6 text-[12px] text-foreground/40">{cleaned}</p>
+    }
+
     case "search-results": {
-      const label = item.query ? `Search: ${item.query}` : "Web search"
+      const label = item.query ? `Search · ${item.query}` : "Web search"
       return (
         <div className="pl-6">
           <DetailRow icon={MagnifyingGlass} label={label} defaultOpen>
@@ -819,33 +1180,19 @@ function ItemRenderer({
 
     case "awaiting-human-timeout":
       return (
-        <div className="py-1.5 pl-6">
-          <div className={cn(
-            "inline-flex items-center gap-2 rounded-lg border px-3 py-1.5",
-            "border-amber-200/60 bg-amber-500/[0.04]",
-            "dark:border-amber-700/40 dark:bg-amber-400/[0.04]",
-          )}>
-            <Timer className="size-3.5 shrink-0 text-amber-500" weight="fill" />
-            <span className="text-[13px] font-medium text-amber-700 dark:text-amber-300">
-              {item.content}
-            </span>
-          </div>
+        <div className="pl-6">
+          <MomentPill tone="attention" icon={<Timer className="size-3.5 shrink-0" weight="fill" />}>
+            {item.content}
+          </MomentPill>
         </div>
       )
 
     case "awaiting-human-resumed":
       return (
-        <div className="py-1.5 pl-6">
-          <div className={cn(
-            "inline-flex items-center gap-2 rounded-lg border px-3 py-1.5",
-            "border-emerald-200/60 bg-emerald-500/[0.04]",
-            "dark:border-emerald-700/40 dark:bg-emerald-400/[0.04]",
-          )}>
-            <CheckCircle className="size-3.5 shrink-0 text-emerald-500" weight="fill" />
-            <span className="text-[13px] font-medium text-emerald-700 dark:text-emerald-300">
-              Human finished — agent resuming with fresh screen state
-            </span>
-          </div>
+        <div className="pl-6">
+          <MomentPill tone="success" icon={<CheckCircle className="size-3.5 shrink-0" weight="fill" />}>
+            Human finished. Agent resuming with fresh screen state.
+          </MomentPill>
         </div>
       )
 
@@ -855,7 +1202,7 @@ function ItemRenderer({
       return (
         <div
           className={cn(
-            "pl-6 py-0.5 text-[15px] leading-relaxed text-foreground/80",
+            "pl-6 text-[14px] leading-relaxed text-foreground/90",
             "min-w-0 overflow-hidden break-words",
             "[&_pre]:whitespace-pre-wrap [&_pre]:break-words [&_pre]:overflow-x-hidden",
             "[&_code]:break-words",

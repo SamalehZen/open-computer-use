@@ -6,6 +6,7 @@ import { LandingHeader } from "@/app/components/landing/landing-header"
 import { LandingFooter } from "@/app/components/landing/landing-footer"
 import { APITab } from "@/app/guide/tabs/api"
 import { DEVELOPERS_API_ENABLED } from "@/lib/feature-flags"
+import { LOCAL_AUTOMATION_SNIPPETS } from "@/lib/local-automation"
 import { motion, AnimatePresence, useMotionValue, useSpring } from "framer-motion"
 import Link from "next/link"
 import { useEffect, useState, type MouseEvent } from "react"
@@ -580,7 +581,7 @@ defer resp.Body.Close()
 function highlightLine(line: string, lang: LangId) {
   // cheap, safe token coloring — no runtime risk, purely regex-based
   const parts: { t: string; c?: string }[] = []
-  let s = line
+  const s = line
   const push = (t: string, c?: string) => parts.push({ t, c })
 
   if (lang === "curl") {
@@ -745,6 +746,83 @@ function TryIt() {
         >
           Full reference <ChevronRight className="h-3 w-3" />
         </a>
+      </div>
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   LOCAL AUTOMATION — bring your own screen. The predict surface
+   pointed at the USER'S desktop / browser / emulator, executed
+   locally with pyautogui / Playwright / robotgo. Snippets live in
+   lib/local-automation.ts (shared with the guide) and their bodies
+   are validated by backend/tests/test_doc_examples.py.
+   ═══════════════════════════════════════════════════════════════ */
+
+function LocalTryIt() {
+  const [lang, setLang] = useState<LangId>("python")
+
+  return (
+    <div className="mx-auto max-w-3xl">
+      {/* Tabs */}
+      <div className="relative inline-flex items-center rounded-xl border border-border/30 bg-card/50 backdrop-blur-sm p-1 mb-5">
+        {LANGS.map((l) => {
+          const active = l.id === lang
+          return (
+            <button
+              key={l.id}
+              onClick={() => setLang(l.id)}
+              className={`relative px-4 py-1.5 text-[12px] font-medium rounded-lg transition-colors ${
+                active ? "text-foreground" : "text-muted-foreground/55 hover:text-foreground/80"
+              }`}
+            >
+              {active && (
+                <motion.span
+                  layoutId="local-lang-pill"
+                  transition={{ type: "spring", stiffness: 320, damping: 28 }}
+                  className="absolute inset-0 rounded-lg bg-foreground/[0.06] border border-border/40"
+                />
+              )}
+              <span className="relative">{l.label}</span>
+            </button>
+          )
+        })}
+      </div>
+
+      {/* Code card */}
+      <div className="relative rounded-2xl border border-border/30 bg-card/50 backdrop-blur-sm overflow-hidden">
+        <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-foreground/[0.08] to-transparent" />
+        <div className="flex items-center justify-between px-5 py-2.5 border-b border-border/20">
+          <div className="flex items-center gap-2">
+            <Terminal className="h-3.5 w-3.5 text-muted-foreground/40" />
+            <span className="text-[11px] font-mono text-muted-foreground/55">
+              your screen → /v1 → your input events
+            </span>
+          </div>
+        </div>
+        <AnimatePresence mode="wait">
+          <motion.div
+            key={lang}
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
+            transition={{ duration: 0.2, ease }}
+          >
+            <CodeBlock code={LOCAL_AUTOMATION_SNIPPETS[lang]} lang={lang} />
+          </motion.div>
+        </AnimatePresence>
+      </div>
+
+      {/* Footnote strip */}
+      <div className="mt-3 flex items-center gap-2 text-[11px] font-mono text-muted-foreground/45">
+        <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+        <span>Coordinates come back in the space of the screenshot you sent — scale before you click.</span>
+        <Link
+          href="/guide?tab=api#local-overview"
+          className="ml-auto hidden sm:inline-flex items-center gap-1 text-foreground/60 hover:text-foreground transition-colors"
+        >
+          Full local guide <ChevronRight className="h-3 w-3" />
+        </Link>
       </div>
     </div>
   )
@@ -978,7 +1056,7 @@ function PricingRow({
         {description}
       </span>
       <span
-        className={`text-[11px] font-mono font-semibold w-16 text-right shrink-0 ${
+        className={`text-[11px] font-mono font-semibold w-20 text-right shrink-0 ${
           highlight ? "text-emerald-600 dark:text-emerald-400" : "text-foreground/60"
         }`}
       >
@@ -1073,7 +1151,7 @@ export default function ApiDocsPage() {
                 Give your code
                 <br />
                 <span className="relative inline-block">
-                  <span className="bg-gradient-to-r from-foreground via-foreground/60 to-foreground/40 bg-clip-text text-transparent">
+                  <span className="bg-gradient-to-r from-foreground via-foreground/60 to-foreground/40 bg-clip-text text-transparent pb-1 sm:pb-2">
                     eyes and hands.
                   </span>
                   <motion.span
@@ -1198,9 +1276,12 @@ export default function ApiDocsPage() {
             {[
               "POST /v1/machines",
               "GET /v1/machines",
+              "GET /v1/machines/pricing",
+              "PATCH /v1/machines/{id}",
               "DELETE /v1/machines/{id}",
               "POST /v1/machines/{id}/start",
               "POST /v1/machines/{id}/stop",
+              "POST /v1/machines/{id}/restart",
               "POST /v1/machines/{id}/snapshot",
               "GET /v1/machines/{id}/screenshot",
               "GET /v1/machines/{id}/connection",
@@ -1242,7 +1323,7 @@ export default function ApiDocsPage() {
             </h2>
             <p className="text-[14px] sm:text-base text-muted-foreground/55 max-w-xl mx-auto">
               Run an agent on a cron, fire it from any webhook with HMAC, or chain schedules together.
-              Per-fire 10 cr/min · webhook routing 1 cr / 200 fires · sandbox is free.
+              Webhook fires free (no routing fee, $0.20 wallet gate) · execution 10 cr/min from subscription credits (min 20, 6 h cap) · sandbox is free.
             </p>
           </motion.div>
 
@@ -1269,6 +1350,59 @@ export default function ApiDocsPage() {
               "DELETE /v1/schedules/{id}/triggers/{tid}",
               "POST /v1/triggers/webhook/{wh}  ←  unauth · HMAC",
               "POST /v1/triggers/email-mailbox",
+            ].map((path) => (
+              <code
+                key={path}
+                className="text-[10px] font-mono text-muted-foreground/55 px-2.5 py-1 rounded-md border border-border/30 bg-card/30"
+              >
+                {path}
+              </code>
+            ))}
+          </motion.div>
+        </div>
+      </section>
+
+      <SectionDivider />
+
+      {/* ─── LOCAL AUTOMATION (bring your own screen) ─── */}
+      <section className="py-24 px-7 sm:px-10 relative">
+        <div className="mx-auto max-w-6xl">
+          <motion.div
+            initial={{ opacity: 0, y: 12 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
+            transition={{ duration: 0.5, ease }}
+            className="text-center mb-12"
+          >
+            <div className="inline-flex items-center gap-2 h-6 px-3 rounded-full border border-border/30 bg-card/30 text-[10px] font-mono text-muted-foreground/60 mb-5">
+              <Terminal className="h-3 w-3" />
+              Local automation
+            </div>
+            <h2 className="text-[28px] sm:text-4xl font-bold tracking-[-0.02em] mb-4">
+              Automate any screen. Yours included.
+            </h2>
+            <p className="text-[14px] sm:text-base text-muted-foreground/55 max-w-xl mx-auto">
+              predict, ground and sessions are screen-agnostic — feed them screenshots from your own
+              desktop, a Playwright page, a phone emulator, or a VNC frame, and execute the returned
+              actions with pyautogui, page.mouse, or adb. No VM required.
+            </p>
+          </motion.div>
+
+          <LocalTryIt />
+
+          <motion.div
+            initial={{ opacity: 0, y: 8 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
+            transition={{ duration: 0.4, delay: 0.1, ease }}
+            className="mt-8 flex flex-wrap justify-center gap-2 max-w-3xl mx-auto"
+          >
+            {[
+              "your desktop  ·  mss + pyautogui",
+              "a browser  ·  Playwright",
+              "a phone  ·  adb screencap + input",
+              "VNC / RDP  ·  framebuffer + injected input",
+              "a Coasty VM  ·  /v1/machines runs the loop for you",
             ].map((path) => (
               <code
                 key={path}
@@ -1395,7 +1529,7 @@ export default function ApiDocsPage() {
               Per-request pricing. No subscription.
             </h2>
             <p className="text-[14px] sm:text-base text-muted-foreground/55 max-w-md mx-auto">
-              Deducted from your shared credit balance. Management endpoints always free.
+              Billed to your API wallet — 1 credit = $0.01, separate from subscription credits. Charged before execution, refunded on failure. Management endpoints and sandbox keys always free.
             </p>
           </motion.div>
 
@@ -1415,17 +1549,25 @@ export default function ApiDocsPage() {
               <span className="text-[9.5px] font-mono font-semibold text-muted-foreground/45 uppercase tracking-[0.15em] hidden sm:block w-44">
                 Description
               </span>
-              <span className="text-[9.5px] font-mono font-semibold text-muted-foreground/45 uppercase tracking-[0.15em] w-16 text-right">
+              <span className="text-[9.5px] font-mono font-semibold text-muted-foreground/45 uppercase tracking-[0.15em] w-20 text-right">
                 Cost
               </span>
             </div>
             <div className="divide-y divide-border/15">
-              <PricingRow endpoint="POST /predict" cost="5 cr" description="Screenshot to actions" />
-              <PricingRow endpoint="POST /sessions" cost="10 cr" description="Create multi-step session" />
-              <PricingRow endpoint="POST /sessions/{id}/predict" cost="4 cr" description="Predict within session" />
-              <PricingRow endpoint="POST /ground" cost="3 cr" description="Find element coordinates" />
-              <PricingRow endpoint="POST /ocr" cost="3 cr" description="Extract text from image" />
-              <PricingRow endpoint="POST /parse" cost="Free" description="Parse action code" highlight />
+              <PricingRow endpoint="POST /predict" cost="5 cr" description="$0.05 — screenshot to actions" />
+              <PricingRow endpoint="POST /sessions" cost="10 cr" description="$0.10 — create session, no surcharges" />
+              <PricingRow endpoint="POST /sessions/{id}/predict" cost="4 cr" description="$0.04 — predict within session" />
+              <PricingRow endpoint="POST /ground" cost="3 cr" description="$0.03 — find element coordinates" />
+              <PricingRow endpoint="Run / workflow agent step (v3, v4)" cost="5 cr" description="$0.05 per completed step" />
+              <PricingRow endpoint="Run / workflow agent step (v1)" cost="8 cr" description="$0.08 — 5 base + 3 v1 engine" />
+              <PricingRow endpoint="Machine running — Linux" cost="5 cr/hr" description="$0.05/hr, per-minute granularity" />
+              <PricingRow endpoint="Machine running — Windows" cost="9 cr/hr" description="$0.09/hr, per-minute granularity" />
+              <PricingRow endpoint="Machine stopped / suspended" cost="1 cr/hr" description="$0.01/hr — creating/terminated free" />
+              <PricingRow endpoint="POST /machines/{id}/snapshot" cost="1 cr" description="$0.01 one-time" />
+              <PricingRow endpoint="POST /parse" cost="Free" description="OCR / parse — no LLM cost" highlight />
+              <PricingRow endpoint="Machine actions · terminal · browser · files" cost="Free" description="Covered by hourly runtime" highlight />
+              <PricingRow endpoint="Workflow control-flow steps" cost="Free" description="if / loop / parallel / retry / wait" highlight />
+              <PricingRow endpoint="Schedules create · run · webhook fire" cost="Free" description="$0.20 wallet gate, no per-fire fee" highlight />
               <PricingRow
                 endpoint="GET /models, /usage, /sessions"
                 cost="Free"
@@ -1451,7 +1593,7 @@ export default function ApiDocsPage() {
                 ["Trajectory screenshot", "+2 cr each"],
                 ["HD image >1280×720", "+1 cr/image"],
                 ["V1 engine", "+3 cr/request"],
-                ["Custom system prompt", "+1 cr"],
+                ["System prompt >500 chars", "+1 cr"],
               ].map(([label, cost]) => (
                 <div
                   key={label}
@@ -1464,6 +1606,9 @@ export default function ApiDocsPage() {
                 </div>
               ))}
             </div>
+            <p className="mt-3 text-[10.5px] text-muted-foreground/40 leading-relaxed">
+              Surcharges apply to predict, session predict and ground; session create has none. HD is strictly larger than 1280×720. Gates, not fees: machine provisioning, schedule create, run-now and webhook fires each require a $0.20 API-wallet balance. Scheduled-run execution bills subscription credits at 10 cr/min (min 20 credits, 6 h cap). Machines auto-stop (never destroyed) if the wallet empties. Test keys (sk-coasty-test-*) bill 0 everywhere. Live machine rates: GET /v1/machines/pricing.
+            </p>
           </motion.div>
         </div>
       </section>

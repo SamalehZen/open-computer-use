@@ -1,6 +1,22 @@
 import { createClient } from "@/lib/supabase/server"
+import { createServiceClient } from "@/lib/supabase/service"
+import type { SupabaseClient } from "@supabase/supabase-js"
 import { NextResponse } from "next/server"
 import * as crypto from "crypto"
+
+// Cookie/RLS client authenticates the request; the service-role client does
+// the actual table I/O. The `api_keys` table grants the authenticated role
+// only SELECT + UPDATE policies (no INSERT), and `api_usage` is service-
+// managed, so the RLS client can list/revoke but NOT mint keys or read usage.
+// Every query in these routes is scoped by the authenticated `user_id`, so
+// using the service role here is safe and mirrors the FastAPI backend, which
+// also writes `api_keys` with the service role.
+function getDb(): SupabaseClient | null {
+  // Cast away the strict generated-schema typing: api_keys / api_usage /
+  // user_credits aren't in app/types/database.types.ts, and the cookie client
+  // these routes used before was untyped (Promise<any>). Runtime is identical.
+  return createServiceClient() as unknown as SupabaseClient | null
+}
 
 // ── Key prefix + hashing configuration ──
 //
@@ -21,9 +37,55 @@ const HASH_VERSION_HMAC_SHA256 = "hmac-sha256-v1"
 const NEW_FORMAT_ENABLED =
   (process.env.API_KEY_NEW_FORMAT_ENABLED ?? "true").toLowerCase() !== "false"
 
-// Per-user limit + scopes default — match backend api_key_service.
+// Per-user limit + scopes default — MUST stay in lockstep with backend
+// api_key_service.DEFAULT_SCOPES_LIST. A key minted here is validated by the
+// FastAPI backend's scope gates, so a too-narrow default silently 403s the
+// runs/workflows/machines surface (INSUFFICIENT_SCOPE) even though the key is
+// otherwise valid. These are the conservative defaults a fresh key receives.
 const MAX_KEYS_PER_USER = 20
-const DEFAULT_SCOPES = ["predict", "session", "ground", "ocr", "parse"]
+const DEFAULT_SCOPES = [
+  "predict",
+  "session",
+  "ground",
+  "parse",
+  // Full machine lifecycle is granted by default: provision/terminate/
+  // start/stop/restart/TTL (machines:write), inspect (machines:read), drive
+  // (actions:exec), shell (terminal:exec), files both ways, snapshots.
+  // Driving VMs is the documented purpose of the product; ownership is
+  // enforced on every call. Only the two high-risk scopes (connection:read —
+  // plaintext SSH/VNC secrets — and browser:execute — arbitrary JS) stay
+  // opt-in below.
+  "machines:read",
+  "machines:write",
+  "actions:exec",
+  "terminal:exec",
+  "files:read",
+  "files:write",
+  "snapshots:write",
+  // Runs + Workflows are the headline developer-agent surface — granted by
+  // default so a fresh key can start a run / workflow without re-minting.
+  "runs:read",
+  "runs:write",
+  "workflows:read",
+  "workflows:write",
+]
+
+// The complete set of scopes a key MAY hold — mirrors backend
+// api_key_service.ALL_SCOPES. Used to validate caller-supplied scopes: anything
+// in here is allowed (even if not granted by default), anything else is a typo
+// and is rejected with INVALID_SCOPE. High-risk scopes (connection:read,
+// browser:execute) are not in DEFAULT_SCOPES but can be requested explicitly
+// at key-creation time.
+const ALL_SCOPES: ReadonlySet<string> = new Set([
+  ...DEFAULT_SCOPES,
+  "keys", // listing/revoking own keys via the API
+  "usage", // reading usage summary
+  "browser:execute",
+  "connection:read",
+  "schedules:read",
+  "schedules:write",
+  "triggers:write",
+])
 
 /**
  * Hash a raw key. Mirrors `_hash_sha256` / `_hash_hmac_sha256` in
@@ -86,13 +148,17 @@ export async function GET() {
     }
 
     const userId = authData.user.id
+    const db = getDb()
+    if (!db) {
+      return NextResponse.json({ error: "Service unavailable" }, { status: 500 })
+    }
     const now = Date.now()
     const thirtyDaysAgo = new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString()
     const sevenDaysAgo = new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString()
     const oneDayAgo = new Date(now - 24 * 60 * 60 * 1000).toISOString()
 
     // Fetch keys
-    const { data: keys, error } = await supabase
+    const { data: keys, error } = await db
       .from("api_keys")
       .select("id, name, tier, scopes, created_at, last_used_at, key_prefix")
       .eq("user_id", userId)
@@ -104,7 +170,7 @@ export async function GET() {
     }
 
     // Fetch 30-day usage with full detail
-    const { data: usage } = await supabase
+    const { data: usage } = await db
       .from("api_usage")
       .select("endpoint, credits_charged, created_at, request_id")
       .eq("user_id", userId)
@@ -149,13 +215,78 @@ export async function GET() {
       .map(([date, v]) => ({ date, ...v }))
       .sort((a, b) => a.date.localeCompare(b.date))
 
-    // ── Recent requests (last 200, with request_id) ──
-    const recent = rows.slice(0, 200).map(r => ({
-      endpoint: r.endpoint,
-      credits: r.credits_charged ?? 0,
-      time: r.created_at,
-      request_id: r.request_id ?? null,
-    }))
+    // ── Recent requests (rich per-request log) ──
+    // Read the full request log (`api_requests`) rather than the billing
+    // ledger (`api_usage`) so Logs can show status, latency, errors, and
+    // tokens — and crucially INCLUDE failed requests and free `parse` calls,
+    // which never reach `api_usage` (record_usage only runs on the billed
+    // success path). We deliberately do NOT surface the resolved `model` id —
+    // the underlying engine is an internal detail, not part of the developer
+    // contract. Defensive: `api_requests` is provisioned outside the repo
+    // migrations, so if the table/columns differ we fall back to the thin
+    // `api_usage`-derived logs rather than 500-ing the whole dashboard.
+    type RecentRow = {
+      endpoint: string
+      credits: number
+      time: string
+      request_id: string | null
+      status?: string | null
+      error_code?: string | null
+      error_message?: string | null
+      duration_ms?: number | null
+      cua_version?: string | null
+      input_tokens?: number | null
+      output_tokens?: number | null
+      was_refunded?: boolean
+      instruction?: string | null
+    }
+    let recent: RecentRow[]
+    try {
+      const { data: reqRows, error: reqErr } = await db
+        .from("api_requests")
+        .select(
+          "request_id, endpoint, status, error_code, error_message, credits_charged, " +
+            "duration_ms, cua_version, input_tokens, output_tokens, was_refunded, created_at, instruction",
+        )
+        .eq("user_id", userId)
+        .gte("created_at", thirtyDaysAgo)
+        .order("created_at", { ascending: false })
+        .limit(200)
+      if (reqErr) throw new Error(reqErr.message)
+      // supabase-js infers the long concatenated select as GenericStringError[]
+      // at the type level (runtime is unaffected); cast to a plain row shape.
+      recent = ((reqRows ?? []) as unknown as Record<string, unknown>[]).map((r) => {
+        const instruction = (r.instruction as string | null) ?? null
+        return {
+          endpoint: (r.endpoint as string) ?? "unknown",
+          credits: (r.credits_charged as number | null) ?? 0,
+          time: r.created_at as string,
+          request_id: (r.request_id as string | null) ?? null,
+          // CUA run status (continue/done/fail) where present. The pass/fail
+          // OUTCOME is derived client-side from error_code.
+          status: (r.status as string | null) ?? null,
+          error_code: (r.error_code as string | null) ?? null,
+          error_message: (r.error_message as string | null) ?? null,
+          duration_ms: (r.duration_ms as number | null) ?? null,
+          cua_version: (r.cua_version as string | null) ?? null,
+          input_tokens: (r.input_tokens as number | null) ?? null,
+          output_tokens: (r.output_tokens as number | null) ?? null,
+          was_refunded: Boolean(r.was_refunded),
+          // Preview only — the full task text is the developer's own data, but
+          // keep the payload lean across 200 rows.
+          instruction:
+            instruction && instruction.length > 200 ? instruction.slice(0, 200) + "…" : instruction,
+        }
+      })
+    } catch {
+      // Older/absent api_requests schema — degrade to the billing-ledger logs.
+      recent = rows.slice(0, 200).map(r => ({
+        endpoint: r.endpoint,
+        credits: r.credits_charged ?? 0,
+        time: r.created_at,
+        request_id: r.request_id ?? null,
+      }))
+    }
 
     // ── Peak hour ──
     const hourBuckets: number[] = new Array(24).fill(0)
@@ -165,12 +296,22 @@ export async function GET() {
     }
     const peakHour = hourBuckets.indexOf(Math.max(...hourBuckets))
 
-    // ── Credit balance ──
-    const { data: creditsData } = await supabase
-      .from("user_credits")
-      .select("balance, subscription_tier")
+    // ── API wallet (dollar balance, independent of the consumer plan) ──
+    // Billing for developer API usage is drawn from the prepaid dollar wallet,
+    // NOT the consumer credit balance. Tier is still read from the consumer
+    // subscription because rate-limit tiers remain coupled for now (billing
+    // was decoupled; tiers are a fast-follow).
+    const { data: walletData } = await db
+      .from("api_wallets")
+      .select("balance_cents, total_topped_up_cents, total_spent_cents")
       .eq("user_id", userId)
-      .single()
+      .maybeSingle()
+    const { data: creditsData } = await db
+      .from("user_credits")
+      .select("subscription_tier")
+      .eq("user_id", userId)
+      .maybeSingle()
+    const walletBalanceCents = Number(walletData?.balance_cents ?? 0)
 
     return NextResponse.json({
       keys: keys ?? [],
@@ -183,7 +324,13 @@ export async function GET() {
         credits7d,
         avgCreditsPerRequest: totalRequests > 0 ? Math.round((totalCredits / totalRequests) * 10) / 10 : 0,
         peakHour: totalRequests > 0 ? peakHour : null,
-        balance: creditsData?.balance ?? 0,
+        // Dollar wallet balance (independent of consumer credits).
+        walletBalanceCents,
+        walletBalanceUsd: walletBalanceCents / 100,
+        walletToppedUpCents: Number(walletData?.total_topped_up_cents ?? 0),
+        walletSpentCents: Number(walletData?.total_spent_cents ?? 0),
+        // `balance` retained for back-compat; now reflects wallet cents.
+        balance: walletBalanceCents,
         tier: creditsData?.subscription_tier ?? "",
       },
       byEndpoint,
@@ -205,6 +352,11 @@ export async function POST(request: Request) {
     const { data: authData } = await supabase.auth.getUser()
     if (!authData?.user?.id) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+    }
+
+    const db = getDb()
+    if (!db) {
+      return NextResponse.json({ error: "Service unavailable" }, { status: 500 })
     }
 
     const body = await request.json()
@@ -236,7 +388,7 @@ export async function POST(request: Request) {
     }
 
     // Per-user key cap (defense-in-depth — backend also enforces).
-    const { count: existingCount } = await supabase
+    const { count: existingCount } = await db
       .from("api_keys")
       .select("id", { count: "exact", head: true })
       .eq("user_id", authData.user.id)
@@ -259,13 +411,8 @@ export async function POST(request: Request) {
     const requestedScopes: string[] = Array.isArray(scopes) && scopes.length > 0
       ? scopes
       : DEFAULT_SCOPES
-    const allowedScopes = new Set([
-      ...DEFAULT_SCOPES,
-      "keys", // listing/revoking own keys via the API
-      "usage", // reading usage summary
-    ])
     for (const s of requestedScopes) {
-      if (typeof s !== "string" || !allowedScopes.has(s)) {
+      if (typeof s !== "string" || !ALL_SCOPES.has(s)) {
         return NextResponse.json(
           {
             error: {
@@ -283,7 +430,7 @@ export async function POST(request: Request) {
     const { hash: keyHash, hashVersion, pepperId } = hashKey(rawKey, kind)
     const keyId = crypto.randomBytes(8).toString("hex")
 
-    const { error } = await supabase.from("api_keys").insert({
+    const { error } = await db.from("api_keys").insert({
       id: keyId,
       user_id: authData.user.id,
       key_hash: keyHash,

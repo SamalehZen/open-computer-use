@@ -1,16 +1,12 @@
-import { notFound } from "next/navigation"
-import { LayoutApp } from "@/app/components/layout/layout-app"
-import { DevelopersContent } from "@/app/components/developers/developers-content"
-import { DEVELOPERS_API_ENABLED } from "@/lib/feature-flags"
+import { redirect } from "next/navigation"
 
 export const dynamic = "force-dynamic"
 
+// The developer dashboard was split into independent pages (keys / logs /
+// usage / docs). The bare /developers route now lands on API keys — the
+// primary surface. The sidebar links straight to each sub-route, so users
+// rarely hit this redirect, but deep links and bookmarks to /developers keep
+// working.
 export default function DevelopersPage() {
-  if (!DEVELOPERS_API_ENABLED) notFound()
-
-  return (
-    <LayoutApp>
-      <DevelopersContent />
-    </LayoutApp>
-  )
+  redirect("/developers/keys")
 }

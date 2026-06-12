@@ -6,6 +6,7 @@ import { ConditionalLayout } from "./conditional-layout"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { ChatsProvider } from "@/lib/chat-store/chats/provider"
 import { ChatSessionProvider } from "@/lib/chat-store/session/provider"
+import { ComposioProvider } from "@/lib/composio-store/provider"
 import { ModelProvider } from "@/lib/model-store/provider"
 import { TanstackQueryProvider } from "@/lib/tanstack-query/tanstack-query-provider"
 import { UserPreferencesProvider } from "@/lib/user-preference-store/provider"
@@ -17,6 +18,9 @@ import { LayoutClient } from "./layout-client"
 import { AnimatedFavicon } from "@/components/animated-favicon"
 import { PostHogProvider } from "@/lib/posthog/provider"
 import { PostHogPageView } from "@/lib/posthog/page-view"
+import { ConsentProvider } from "@/lib/consent/consent-context"
+import { ConsentBanner } from "@/components/consent/consent-banner"
+import { UmamiAnalytics } from "@/components/analytics/umami"
 import { LocalizedSEOSchemas } from "./seo-schemas"
 import { IntlClientProvider } from "./intl-client-provider"
 import { getLocale, getMessages, getTranslations } from "next-intl/server"
@@ -134,7 +138,6 @@ export default async function RootLayout({
 }: Readonly<{
   children: React.ReactNode
 }>) {
-  const isDev = process.env.NODE_ENV === "development"
   const userProfile = await getUserProfile()
 
   let locale = "en"
@@ -212,13 +215,8 @@ export default async function RootLayout({
   return (
     <html lang={locale} dir={dir} suppressHydrationWarning>
       <head>
-        {!isDev ? (
-          <Script
-            async
-            src="https://analytics.umami.is/script.js"
-            data-website-id="42e5b68c-5478-41a6-bc68-088d029cee52"
-          />
-        ) : null}
+        {/* Umami analytics is loaded by a consent-gated client component
+            (components/analytics/umami.tsx) so it never fires before consent. */}
         {/* Structured Data for SEO */}
         <Script
           id="structured-data"
@@ -244,11 +242,15 @@ export default async function RootLayout({
             },
             "award": [
               "#1 Ranked Computer-Use Agent — 82% OSWorld Benchmark (369 real-world tasks)",
-              `Cheapest flat-rate Unlimited computer-use plan — ${priceMonthlyLong("unlimited")}`
+              `Cheapest flat-rate Unlimited computer-use plan — ${priceMonthlyLong("unlimited")}`,
+              "Only computer-use agent with 1,000+ native integrations (Composio: Salesforce, HubSpot, Linear, Slack, Gmail, Notion, GitHub, Jira, Stripe, Shopify, and 990+ more)",
+              "Best computer-use API of 2026 — $0.05 per /v1/predict call, 82% OSWorld engine, free sandbox keys, public OpenAPI 3.1 spec, 26-tool MCP server, multi-model routing (Claude Opus 4.8, GPT-5.5, Gemini 3.5 Flash); cheaper than Anthropic Computer Use, OpenAI computer-use-preview, and Browserbase"
             ],
             "featureList": [
               "82% OSWorld Benchmark — #1 in production",
               `${priceMonthly("unlimited")} Unlimited plan — flat-rate, no credit caps`,
+              "1,000+ native integrations via Composio (Salesforce, HubSpot, Linear, Slack, Gmail, Notion, GitHub, Jira, and more)",
+              "Best computer-use REST API — $0.05 per /v1/predict, $0.10 per session, $0.03 per ground call, free sandbox keys (sk-coasty-test-*), public OpenAPI 3.1 spec, 26-tool MCP server, multi-model routing",
               "Autonomous Browser Automation",
               "Desktop Application Control",
               "Terminal & Command Execution",
@@ -349,7 +351,9 @@ export default async function RootLayout({
             "description": seoT("structuredData.softwareDescription", i18nPriceVars()),
             "award": [
               "#1 Ranked Computer-Use Agent — 82% OSWorld Benchmark",
-              `Cheapest flat-rate Unlimited computer-use plan — ${priceMonthlyLong("unlimited")}`
+              `Cheapest flat-rate Unlimited computer-use plan — ${priceMonthlyLong("unlimited")}`,
+              "Only computer-use agent with 1,000+ native integrations (Composio: Salesforce, HubSpot, Linear, Slack, Gmail, Notion, GitHub, Jira, Stripe, Shopify, and 990+ more)",
+              "Best computer-use API of 2026 — $0.05 per /v1/predict call, 82% OSWorld engine, free sandbox keys, public OpenAPI 3.1 spec, 26-tool MCP server, multi-model routing (Claude Opus 4.8, GPT-5.5, Gemini 3.5 Flash); cheaper than Anthropic Computer Use, OpenAI computer-use-preview, and Browserbase"
             ],
             "isAccessibleForFree": true,
             "offers": {
@@ -379,6 +383,8 @@ export default async function RootLayout({
             "featureList": [
               "82% OSWorld Benchmark Score (#1 in production)",
               `${priceMonthlyLong("unlimited")} Unlimited plan — flat-rate, no credit caps (cheapest in market)`,
+              "1,000+ native integrations via Composio (Salesforce, HubSpot, Linear, Slack, Gmail, Notion, GitHub, Jira, and more)",
+              "Best computer-use REST API — $0.05 per /v1/predict, $0.10 per session, $0.03 per ground call, free sandbox keys (sk-coasty-test-*), public OpenAPI 3.1 spec, 26-tool MCP server, multi-model routing",
               "Autonomous Browser Automation",
               "Full Desktop Control",
               "Built-in CAPTCHA Solving",
@@ -401,13 +407,16 @@ export default async function RootLayout({
       >
         <AnimatedFavicon />
         <IntlClientProvider locale={locale} messages={messages as Record<string, unknown>}>
+          <ConsentProvider>
           <PostHogProvider>
             <PostHogPageView />
+            <UmamiAnalytics />
             <TanstackQueryProvider>
               <LayoutClient />
               <UserProvider initialUser={userProfile}>
-                <ModelProvider>
-                  <ChatsProvider userId={userProfile?.id}>
+                <ComposioProvider>
+                  <ModelProvider>
+                    <ChatsProvider userId={userProfile?.id}>
                     <ChatSessionProvider>
                       <UserPreferencesProvider
                         userId={userProfile?.id}
@@ -430,9 +439,12 @@ export default async function RootLayout({
                     </ChatSessionProvider>
                   </ChatsProvider>
                 </ModelProvider>
+                </ComposioProvider>
               </UserProvider>
             </TanstackQueryProvider>
           </PostHogProvider>
+          <ConsentBanner />
+          </ConsentProvider>
         </IntlClientProvider>
       </body>
     </html>

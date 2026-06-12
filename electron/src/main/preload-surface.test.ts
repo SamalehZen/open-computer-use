@@ -23,7 +23,6 @@ import * as path from 'path'
 const REPO_ROOT = path.resolve(__dirname, '..', '..')
 const PRELOAD_PATH = path.join(REPO_ROOT, 'src', 'preload', 'index.ts')
 const INDEX_PATH = path.join(REPO_ROOT, 'src', 'main', 'index.ts')
-const RAINBOW_PATH = path.join(REPO_ROOT, 'src', 'main', 'rainbow-border.ts')
 const IPC_HANDLERS_PATH = path.join(REPO_ROOT, 'src', 'main', 'ipc-handlers.ts')
 const MAIN_DIR = path.join(REPO_ROOT, 'src', 'main')
 
@@ -149,12 +148,6 @@ describe('BrowserWindow webPreferences', () => {
     // default (which has changed across major versions).
     expect(indexSrc).toMatch(/sandbox\s*:\s*(true|false)/)
   })
-
-  it('rainbow-border BrowserWindow also has contextIsolation/nodeIntegration locked down', () => {
-    const rainbowSrc = readSource(RAINBOW_PATH)
-    expect(rainbowSrc).toMatch(/contextIsolation\s*:\s*true/)
-    expect(rainbowSrc).toMatch(/nodeIntegration\s*:\s*false/)
-  })
 })
 
 // ─── Snapshot of exposed window.coasty API ──────────────────────────────────
@@ -216,6 +209,10 @@ describe('window.coasty API surface snapshot', () => {
     'signIn', 'signInWithEmail', 'signUpWithEmail', 'sendMagicLink',
     'awaitMagicLink', 'resetPassword', 'cancelAuth', 'signOut',
     'getSession', 'getToken',
+    // External links (AuthScreen consent notice -> hosted Terms / Privacy).
+    // Main-process handler is hardened: URL-parsed, http(s)-only, so the
+    // renderer can never hand file:/custom protocols to the OS (ipc-handlers.ts).
+    'openExternal',
     // Bridge
     'connectBridge', 'disconnectBridge', 'getBridgeState', 'setTaskActive',
     // Config

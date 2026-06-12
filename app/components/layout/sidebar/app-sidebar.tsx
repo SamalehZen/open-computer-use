@@ -16,15 +16,18 @@ import {
 import { useUser } from "@/lib/user-store/provider"
 import { useRouter } from "next/navigation"
 import { useState, useEffect, useCallback, useRef } from "react"
-import { IconPin, IconPinFilled } from "@tabler/icons-react"
+import { IconLayoutSidebar, IconLayoutSidebarFilled } from "@tabler/icons-react"
 import { DialogCollaborativeAuth } from "../../collaborative/dialog-collaborative-auth"
 import { CoastyIcon } from "@/components/icons/coasty"
 import { cn } from "@/lib/utils"
 import { ReferralPopup } from "../../referral/referral-popup"
 import { SidebarNavSection } from "./sidebar-nav-section"
 import { SidebarFooterSection } from "./sidebar-footer-section"
+import { PlatformModeSwitcher } from "./platform-mode-switcher"
+import { PLATFORM_MODE_SWITCHER_ENABLED } from "@/lib/feature-flags"
 import { MemoryDialog } from "@/app/components/layout/settings/general/memory-dialog"
 import { useMemoryDialog } from "@/lib/memory-dialog-store"
+import { PlatformSwitchLoader } from "./platform-switch-loader"
 
 const SIDEBAR_PINNED_KEY = "coasty:sidebar:pinned"
 
@@ -148,29 +151,28 @@ export function AppSidebar() {
         } as React.CSSProperties}
       >
         {/* ─── Header ───────────────────────────────────────
-            Same padding & layout in both modes so the logo never
-            shifts horizontally. Logo center anchored at sidebar-x=24
-            (parent px-2 + button px-1 + logo-half 12), matching the
-            nav icon column below. Wordmark uses gap-1.5 so its left
-            edge lands at x=42 — same as nav item labels.
+            Same padding in both modes so the logo never shifts: its
+            center stays at sidebar-x=24 (parent px-2 + button px-1 +
+            logo-half 12), matching the nav icon column below.
 
-            The pin button only renders when expanded — it would have
-            no room in the 48px collapsed rail. Logo button takes
-            `flex-1 min-w-0` so it shrinks gracefully when the pin
-            button shows, instead of pushing it offscreen. */}
+            Expanded layout (left→right): logo (home) · platform-mode
+            switcher (flex-1) · pin. The switcher and pin are expanded-
+            only — neither fits the 48px collapsed rail; collapsed shows
+            just the logo icon. */}
         <SidebarHeader className="p-0">
-          <div className="flex items-center min-h-[44px] px-2 pt-2 pb-1 gap-0.5">
+          <div className="flex items-center min-h-[44px] px-2 pt-2 pb-1 gap-1">
             <button
               onClick={() => {
                 setLogoClicks(c => c + 1)
                 handleNavigation(() => router.push("/"))
               }}
               className={cn(
-                "flex flex-1 min-w-0 items-center gap-1.5 px-1 py-1.5 rounded-lg transition-colors duration-150",
+                "flex shrink-0 items-center justify-center px-1 py-1.5 rounded-lg transition-colors duration-150",
                 "hover:bg-foreground/[0.04] dark:hover:bg-white/[0.04]",
                 "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/50"
               )}
               title="Coasty"
+              aria-label="Coasty — home"
             >
               <div className={cn(
                 "flex h-6 w-6 items-center justify-center shrink-0 transition-transform duration-500",
@@ -178,21 +180,28 @@ export function AppSidebar() {
               )}>
                 <CoastyIcon className="h-6 w-6 text-sidebar-primary" />
               </div>
-              {expanded && (
-                <span className="text-[13.5px] font-semibold text-foreground/90 tracking-[-0.015em] leading-tight truncate">
-                  Coasty
-                </span>
-              )}
             </button>
 
-            {/* ── Pin toggle ──
-                Desktop-only — on mobile the sidebar is a sheet
-                drawer with no hover-to-expand, so pinning has no
-                meaning. Filled-pin tilted 45° in pinned state reads
-                as "stuck"; outline-pin upright reads as "loose /
-                will close on mouse-out". Color shifts from a quiet
-                foreground/30 to a deliberate foreground/75 with a
-                subtle bg when active. */}
+            {/* Platform mode switcher — the "text box next to the logo"
+                naming the current platform (Consumer / Developer) and
+                letting the user switch. Expanded-only, behind a flag. */}
+            {expanded && PLATFORM_MODE_SWITCHER_ENABLED && (
+              // Compact (shrink-to-content) so it reads as a tidy label beside
+              // the logo at every width, instead of stretching across the wider
+              // mobile sheet. `min-w-0` lets it truncate if the row ever gets
+              // tight; the pin's `ml-auto` keeps it pinned right.
+              <PlatformModeSwitcher className="min-w-0" />
+            )}
+
+            {/* ── Keep-open toggle ──
+                Desktop-only — on mobile the sidebar is a sheet drawer
+                with no hover-to-expand, so this has no meaning. Uses the
+                sidebar-panel glyph (the modern pattern, à la VS Code /
+                Linear) rather than a pushpin: solid/filled panel = locked
+                open, outline panel = will auto-collapse on mouse-out.
+                Color shifts from a quiet foreground/30 to a deliberate
+                foreground/75 with a subtle bg when active; the icon
+                lifts on hover and presses in on click. */}
             {expanded && !isMobile && (
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -202,7 +211,8 @@ export function AppSidebar() {
                     aria-label={pinned ? "Unpin sidebar" : "Keep sidebar open"}
                     aria-pressed={pinned}
                     className={cn(
-                      "flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors duration-150",
+                      "group ml-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-md",
+                      "transition-all duration-150 ease-out active:scale-90",
                       "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/50",
                       pinned
                         ? "text-foreground/75 bg-foreground/[0.05] hover:bg-foreground/[0.08] dark:bg-white/[0.05] dark:hover:bg-white/[0.08]"
@@ -210,16 +220,15 @@ export function AppSidebar() {
                     )}
                   >
                     {pinned ? (
-                      <IconPinFilled
-                        size={13}
-                        stroke={1.5}
-                        className="rotate-45 transition-transform duration-200"
+                      <IconLayoutSidebarFilled
+                        size={15}
+                        className="transition-transform duration-200 ease-out group-hover:scale-110"
                       />
                     ) : (
-                      <IconPin
-                        size={13}
-                        stroke={1.75}
-                        className="transition-transform duration-200"
+                      <IconLayoutSidebar
+                        size={15}
+                        stroke={1.8}
+                        className="transition-transform duration-200 ease-out group-hover:scale-110"
                       />
                     )}
                   </button>
@@ -254,7 +263,7 @@ export function AppSidebar() {
         </SidebarContent>
 
         {/* ─── Footer ─────────────────────────────────────── */}
-        <SidebarFooter className="relative pt-0 border-t border-sidebar-border/15">
+        <SidebarFooter className="relative pt-0">
           <SidebarFooterSection
             user={user}
             expanded={expanded}
@@ -282,6 +291,12 @@ export function AppSidebar() {
           behind the sidebar". Open/close state is shared via the
           `useMemoryDialog` store. */}
       <MemoryDialogMount />
+
+      {/* Full-screen transition that plays on every platform-mode flip
+          (Personal ⇄ Developer), from the header switcher or the in-sidebar
+          rows. Mounted here (outside <Sidebar>) so it can cover the whole
+          viewport and survives the mobile sidebar's exit animation. */}
+      <PlatformSwitchLoader />
     </>
   )
 }

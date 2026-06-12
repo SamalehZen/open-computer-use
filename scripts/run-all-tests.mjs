@@ -27,7 +27,12 @@
 // Flags (any combination):
 //   --parallel    run unit surfaces in parallel
 //   --with-e2e    append e2e to a single-surface filter (e.g. ``electron --with-e2e``)
-//   --no-e2e      skip e2e when filter=all (fast path)
+//   --no-e2e      skip ALL e2e (electron + root web) when filter=all (fast path)
+//   --no-web-e2e  skip ONLY the Root E2E (Playwright web / i18n visual-fit)
+//                 suite; keep the electron e2e. ``npm run test:all`` uses this.
+//   --no-lint     skip ESLint gate when filter=all
+//   --no-security skip security audit gates (JWT leak guard) when filter=all
+//   --no-mcp      skip MCP unit tests when filter=all
 //
 // Env vars:
 //   SKIP_E2E_BUILD=1   reuse existing ``electron/out/`` instead of rebuilding
@@ -58,6 +63,22 @@ const withE2E = argv.includes("--with-e2e")
 // ``--no-e2e`` is the fast-iteration escape hatch. Skips the ~30s electron
 // build + ~3min Playwright matrix and runs only the unit suites.
 const skipE2E = argv.includes("--no-e2e")
+// ``--no-web-e2e`` drops ONLY the Root E2E (Playwright web / i18n visual-fit)
+// suite — the slow Next-dev-driven locale × viewport matrix — while leaving
+// the Electron e2e in place. ``npm run test:all`` passes this so the default
+// local "all" run stays fast; run the web suite on demand with
+// ``npm run test:e2e`` (full matrix) or ``npm run test:e2e:i18n`` (one spec).
+const skipWebE2E = argv.includes("--no-web-e2e")
+// ``--no-lint`` opts out of the ESLint gate (configured but expensive on
+// large diffs). Default-on for filter=all so config drift is surfaced.
+const skipLint = argv.includes("--no-lint")
+// ``--no-security`` opts out of the security audit gates (currently the JWT
+// leak guard). These should normally always run — disable only when
+// iterating locally on unrelated surface.
+const skipSecurity = argv.includes("--no-security")
+// ``--no-mcp`` opts out of the MCP package's own vitest suite. Default-on
+// for filter=all because mcp/ publishes to npm and must stay green.
+const skipMcp = argv.includes("--no-mcp")
 const filter = argv.find((a) => !a.startsWith("--")) || "all"
 
 const results = []
@@ -266,6 +287,19 @@ const wantFrontend = filter === "all" || filter === "frontend"
 const wantBackend = filter === "all" || filter === "backend"
 const wantElectron = filter === "all" || filter === "electron"
 const wantTypecheck = filter === "all" || filter === "typecheck"
+// ESLint gate — runs before typecheck so style/lint failures surface fast
+// before the slower compiler pass. Opt-out via --no-lint.
+const wantLint =
+  filter === "lint" || (filter === "all" && !skipLint)
+// Security audit gate — currently just the JWT leak guard. Runs as part of
+// filter=all unless --no-security is passed, and standalone via filter=security.
+const wantSecurity =
+  filter === "security" || (filter === "all" && !skipSecurity)
+// MCP gate — covers the mcp/ package's own vitest suite (11 test files).
+// Runs as part of filter=all unless --no-mcp is passed, and standalone via
+// filter=mcp.
+const wantMcp =
+  filter === "mcp" || (filter === "all" && !skipMcp)
 // ``e2e`` runs the Playwright real-Electron specs in electron/e2e/. The
 // suite needs a built ``electron/out/main/index.js`` first — handled below
 // by ensureElectronBuild().
@@ -282,6 +316,10 @@ const wantE2E =
   filter === "e2e" ||
   (filter === "all" && !skipE2E) ||
   (filter !== "all" && withE2E)
+// Root web e2e (Playwright vs the Next dev server) is gated SEPARATELY from
+// the Electron e2e so ``--no-web-e2e`` can drop just this slow suite. It rides
+// the same wantE2E matrix above, minus the ``--no-web-e2e`` opt-out.
+const wantRootE2E = wantE2E && !skipWebE2E
 // ``smoke`` boots the packaged unpacked binary under electron/dist/. Unlike
 // e2e, this is NOT auto-built — the user must have already run
 // ``npm run package`` because building installers takes minutes.
@@ -295,13 +333,32 @@ if (parallel && filter === "all") {
     console.log(`${YELLOW}  ⚠ backend/venv not found — backend tests may fail${RESET}\n`)
   }
   const py = pythonCmd()
-  await Promise.all([
+  const parallelTasks = [
     runParallel("frontend",  "npx vitest run --reporter=verbose", ROOT, CYAN),
     runParallel("electron",  "npx vitest run --reporter=verbose", join(ROOT, "electron"), GREEN),
     runParallel("backend",   `${py} -m pytest tests/ -v --tb=short`, join(ROOT, "backend"), YELLOW),
-  ])
+  ]
+  // MCP unit tests fan out cleanly alongside the other vitest suites.
+  if (wantMcp) {
+    parallelTasks.push(runParallel("mcp", "npx vitest run --reporter=verbose", join(ROOT, "mcp"), CYAN))
+  }
+  await Promise.all(parallelTasks)
+  // ESLint runs after the parallel unit fan-out so its output isn't
+  // interleaved with the test reporters.
+  if (wantLint) {
+    await runParallel("eslint", "npm run lint", ROOT, YELLOW)
+  }
   if (wantTypecheck) {
-    await runParallel("typecheck", "npx tsc --noEmit", ROOT, GRAY)
+    await Promise.all([
+      runParallel("typecheck",          "npx tsc --noEmit", ROOT, GRAY),
+      runParallel("typecheck:mcp",      "npm run lint", join(ROOT, "mcp"), GRAY),
+      runParallel("typecheck:electron", "npx tsc --noEmit -p tsconfig.json", join(ROOT, "electron"), GRAY),
+    ])
+  }
+  // Security audit — JWT leak guard. Cheap, runs sequentially after the
+  // heavy work so its output is the last thing before the summary.
+  if (wantSecurity) {
+    await runParallel("security:jwt", "python scripts/check_no_jwt_leak.py", ROOT, RED)
   }
 } else {
   if (wantFrontend) {
@@ -323,9 +380,36 @@ if (parallel && filter === "all") {
     banner("ELECTRON TESTS (Vitest)")
     run("Electron Unit Tests", "npx vitest run --reporter=verbose", join(ROOT, "electron"))
   }
+  // MCP unit tests — mcp/ ships an independent package with its own vitest
+  // config (11 test files at last count). Runs after the electron unit
+  // tests so all JS/TS unit surfaces are clustered together.
+  if (wantMcp) {
+    banner("MCP TESTS (Vitest)")
+    run("MCP Unit Tests", "npx vitest run --reporter=verbose", join(ROOT, "mcp"))
+  }
+  // ESLint — runs before typecheck so cheap style/lint regressions surface
+  // before the slower compiler pass. Uses the configured ``lint`` script at
+  // the repo root.
+  if (wantLint) {
+    banner("LINT (ESLint)")
+    run("ESLint", "npm run lint", ROOT)
+  }
   if (wantTypecheck) {
     banner("TYPE CHECKING")
     run("TypeScript Type Check", "npx tsc --noEmit", ROOT)
+    // MCP has its own tsconfig and publishes to npm — typecheck it
+    // independently (``npm run lint`` in mcp/ is wired to the typecheck).
+    run("MCP Typecheck", "npm run lint", join(ROOT, "mcp"))
+    // Electron has a strict tsconfig but no ``tsc`` npm script, so invoke
+    // tsc directly against its tsconfig.
+    run("Electron Typecheck", "npx tsc --noEmit -p tsconfig.json", join(ROOT, "electron"))
+  }
+  // Security audit — JWT leak guard scans the tree for accidentally
+  // committed JWTs/secrets. Already exits 0/1 cleanly so it slots in as a
+  // normal gate.
+  if (wantSecurity) {
+    banner("SECURITY AUDIT")
+    run("JWT Leak Guard", "python scripts/check_no_jwt_leak.py", ROOT)
   }
 }
 
@@ -366,6 +450,26 @@ if (wantE2E) {
   } else {
     console.log(`${YELLOW}  Skipping e2e — build failed above.${RESET}`)
   }
+}
+
+// ── Root Playwright suite (i18n visual-fit + any future root e2e specs) ──
+// Runs against `<repo>/playwright.config.ts`, which auto-boots `npm run dev`
+// via its webServer block and asserts must-fit invariants across the
+// locale × viewport matrix.
+//
+// Gated SEPARATELY from the Electron e2e via `wantRootE2E`, so it can be
+// dropped on its own: `npm run test:all` passes `--no-web-e2e` to skip this
+// slow Next-dev-driven suite while STILL running the Electron e2e. Run it on
+// demand with `npm run test:e2e` (full matrix) or `npm run test:e2e:i18n`
+// (single spec). It does not depend on the Electron build above, and runs
+// even when the Electron e2e failed — they're independent surfaces.
+if (wantRootE2E) {
+  banner("ROOT E2E TESTS (Playwright web — i18n visual-fit)")
+  run(
+    "Root E2E (Playwright web)",
+    "npx playwright test --config=playwright.config.ts",
+    ROOT,
+  )
 }
 
 if (wantSmoke) {

@@ -19,6 +19,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server"
+import { fetchUpstreamWithRetry, isRetryable } from "@/lib/api/upstream-fetch"
 
 const PYTHON_BACKEND_URL =
   process.env.PYTHON_BACKEND_URL || "http://127.0.0.1:8001"
@@ -28,8 +29,21 @@ const PYTHON_BACKEND_URL =
 // almost always mean misuse (e.g. user pasting a 4K PNG by accident).
 const MAX_BODY_BYTES = 15 * 1024 * 1024
 
-// Hop-by-hop headers we must NOT forward back to the client. These are
-// connection-specific and break under HTTP/2 stream multiplexing.
+// Headers we must NOT forward back to the client.
+//
+// Hop-by-hop headers are connection-specific and break under HTTP/2 stream
+// multiplexing. content-encoding/content-length are stripped for a different
+// reason: Node's fetch (undici) TRANSPARENTLY DECOMPRESSES gzipped upstream
+// bodies but leaves the original headers on response.headers. Copying them
+// onto the decompressed stream emits a plaintext body labeled
+// "Content-Encoding: gzip" with the compressed byte count — Cloudflare's
+// strict parser rejects that as a malformed origin response and serves its
+// own 502 HTML page, while the (lenient) ALB logs a delivered 200. The
+// backend gzips every JSON body >= 1000 bytes (GZipMiddleware in
+// backend/main.py), so exactly the larger responses 502'd: GET /machines
+// with a real machine list deterministically, session predict whenever the
+// reasoning text pushed the body over the floor. Next.js re-frames the
+// response itself, so dropping both headers is always correct here.
 const HOP_BY_HOP = new Set([
   "transfer-encoding",
   "connection",
@@ -39,6 +53,8 @@ const HOP_BY_HOP = new Set([
   "te",
   "trailers",
   "upgrade",
+  "content-encoding",
+  "content-length",
 ])
 
 async function proxyToBackend(
@@ -81,6 +97,12 @@ async function proxyToBackend(
   // the proxy minimal.
   const headers: Record<string, string> = {
     "Content-Type": req.headers.get("Content-Type") || "application/json",
+    // Ask the backend for an uncompressed body. Without this, undici
+    // advertises gzip, the backend compresses (>= 1000B), and undici
+    // immediately decompresses — wasted CPU on both ends of an in-VPC hop,
+    // plus the header/body mismatch hazard documented on HOP_BY_HOP above.
+    // Cloudflare re-compresses toward the client on its own.
+    "Accept-Encoding": "identity",
   }
 
   // Pass through X-API-Key (canonical).
@@ -147,46 +169,39 @@ async function proxyToBackend(
     }
   }
 
-  try {
-    // 90s timeout — must finish before Cloudflare's ~100s proxy timeout
-    const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), 90_000)
+  // Retry transient origin blips (deploy drain / keep-alive reset). Safe for
+  // reads, and for writes carrying an Idempotency-Key (backend dedupes/replays).
+  const retryable = isRetryable(req.method, Boolean(idemp))
+  const result = await fetchUpstreamWithRetry(url.toString(), fetchOptions, retryable)
 
-    const response = await fetch(url.toString(), {
-      ...fetchOptions,
-      signal: controller.signal,
-    })
-
-    clearTimeout(timeout)
-
-    // Stream the response back, preserving status and headers.
-    const responseHeaders = new Headers()
-    response.headers.forEach((value, key) => {
-      const lower = key.toLowerCase()
-      if (!HOP_BY_HOP.has(lower)) {
-        responseHeaders.set(key, value)
-      }
-    })
-
-    return new Response(response.body, {
-      status: response.status,
-      headers: responseHeaders,
-    })
-  } catch (err) {
-    const isTimeout = err instanceof DOMException && err.name === "AbortError"
+  if (result.failed || !result.response) {
     return NextResponse.json(
       {
         error: {
-          code: isTimeout ? "PREDICTION_TIMEOUT" : "SERVICE_UNAVAILABLE",
-          message: isTimeout
+          code: result.timedOut ? "PREDICTION_TIMEOUT" : "SERVICE_UNAVAILABLE",
+          message: result.timedOut
             ? "Request timed out. The AI model may be under heavy load — please retry."
             : "API service temporarily unavailable",
           type: "server_error",
         },
       },
-      { status: isTimeout ? 504 : 503 },
+      { status: result.timedOut ? 504 : 503 },
     )
   }
+
+  // Stream the response back, preserving status and headers.
+  const response = result.response
+  const responseHeaders = new Headers()
+  response.headers.forEach((value, key) => {
+    const lower = key.toLowerCase()
+    if (!HOP_BY_HOP.has(lower)) {
+      responseHeaders.set(key, value)
+    }
+  })
+  return new Response(response.body, {
+    status: response.status,
+    headers: responseHeaders,
+  })
 }
 
 export const GET = proxyToBackend

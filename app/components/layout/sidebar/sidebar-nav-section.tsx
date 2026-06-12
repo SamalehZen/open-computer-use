@@ -8,11 +8,17 @@ import {
   IconClockPlay,
   IconBinaryTree,
   IconDeviceDesktop,
+  IconAffiliate,
   IconCalendarClock,
-  IconShieldLock,
+  IconLockPassword,
   IconKey,
-  IconStack2,
-  IconBrain,
+  IconBrandStackoverflow,
+  IconDatabase,
+  IconActivity,
+  IconChartBar,
+  IconBook2,
+  IconCode,
+  IconUser,
 } from "@tabler/icons-react"
 import { useMemoryDialog } from "@/lib/memory-dialog-store"
 import Link from "next/link"
@@ -36,7 +42,7 @@ import { useSidebar } from "@/components/ui/sidebar"
 import { useChats } from "@/lib/chat-store/chats/provider"
 import { useSidebarMachines } from "./hooks/use-sidebar-machines"
 import { useLazyFetch } from "./hooks/use-lazy-fetch"
-import { DEVELOPERS_API_ENABLED } from "@/lib/feature-flags"
+import { usePlatformMode } from "@/lib/platform-mode-store"
 
 // ─── Types ────────────────────────────────────────────────────────
 type HoverInfo = {
@@ -502,7 +508,7 @@ function SwarmsLivePopup({ swarms }: { swarms: { swarm_id: string; status?: stri
 }
 
 // ─── Nav hover card content ────────────────────────────────────────
-function NavHoverContent({ label, info }: { label: string; info: HoverInfo }) {
+function NavHoverContent({ label, info }: { label: React.ReactNode; info: HoverInfo }) {
   const Visual = visualComponents[info.visual]
   return (
     <div className="flex flex-col overflow-hidden -m-4">
@@ -526,6 +532,7 @@ const NavButton = memo(function NavButton({
   onClick,
   variant = "default",
   id,
+  testId,
   isActive,
   href,
   accentColor,
@@ -534,11 +541,12 @@ const NavButton = memo(function NavButton({
   onHoverCardOpen,
 }: {
   icon: React.ReactNode
-  label: string
+  label: React.ReactNode
   tooltip?: string
   onClick?: () => void
   variant?: "default" | "primary"
   id?: string
+  testId?: string
   isActive?: boolean
   href?: string
   accentColor?: string
@@ -597,11 +605,11 @@ const NavButton = memo(function NavButton({
   )
 
   const linkOrButton = href ? (
-    <Link id={id} href={href} className="block w-full" onClick={onClick}>
+    <Link id={id} data-testid={testId} href={href} className="block w-full" onClick={onClick}>
       {content}
     </Link>
   ) : (
-    <button id={id} className="w-full" type="button" onClick={onClick}>
+    <button id={id} data-testid={testId} className="w-full" type="button" onClick={onClick}>
       {content}
     </button>
   )
@@ -705,6 +713,31 @@ function SectionHeader({ label, expanded }: { label: string; expanded: boolean }
   )
 }
 
+// ─── ModeReveal ───────────────────────────────────────────────────
+//   Smoothly collapses / expands a block of nav sections when the sidebar
+//   morphs between platform modes (Personal ↔ Developer). Uses the grid-rows
+//   [0fr]↔[1fr] technique (same as ResourceDropdown) so the height animates
+//   to its natural size with no magic numbers, plus an opacity cross-fade.
+//   Always mounted so the transition runs in BOTH directions; while collapsed
+//   it's `inert` + pointer-events-none so hidden links aren't focusable or
+//   clickable.
+function ModeReveal({ show, children }: { show: boolean; children: ReactNode }) {
+  return (
+    <div
+      aria-hidden={!show}
+      inert={!show ? true : undefined}
+      className={cn(
+        "grid transition-[grid-template-rows,opacity] ease-[cubic-bezier(0.32,0.72,0,1)]",
+        show
+          ? "grid-rows-[1fr] opacity-100 duration-300"
+          : "grid-rows-[0fr] opacity-0 duration-200 pointer-events-none",
+      )}
+    >
+      <div className="min-h-0 overflow-hidden">{children}</div>
+    </div>
+  )
+}
+
 // ═══════════════════════════════════════════════════════════════════
 //  ResourceDropdown — disclosure row for Computers · Schedules · Creds
 //
@@ -734,6 +767,7 @@ function SectionHeader({ label, expanded }: { label: string; expanded: boolean }
 // the row's `active` state typically defaults to false (no URL to match).
 type ResourceItem = {
   id: string
+  testId?: string
   icon: ReactNode
   label: string
   count?: number
@@ -822,7 +856,7 @@ function ResourceDropdown({ items, label }: { items: ResourceItem[]; label: stri
         )}
       >
         <span className="relative shrink-0 flex items-center justify-center w-4 h-4">
-          <IconStack2
+          <IconBrandStackoverflow
             size={16}
             stroke={1.5}
             className={cn(
@@ -831,7 +865,7 @@ function ResourceDropdown({ items, label }: { items: ResourceItem[]; label: stri
             )}
           />
           {anyDot && !open && (
-            <span className="absolute -top-0.5 -right-0.5 h-1.5 w-1.5 rounded-full bg-emerald-500 ring-[1.5px] ring-sidebar dark:bg-emerald-400" />
+            <span className="absolute -top-0.5 -end-0.5 h-1.5 w-1.5 rounded-full bg-emerald-500 ring-[1.5px] ring-sidebar dark:bg-emerald-400" />
           )}
         </span>
         <span className="flex-1 text-left truncate text-[12.5px] font-medium tracking-[-0.01em]">
@@ -850,11 +884,11 @@ function ResourceDropdown({ items, label }: { items: ResourceItem[]; label: stri
         )}
       >
         <div className="min-h-0 overflow-hidden">
-          <div key={mountKey} className="relative pl-4 pr-0 pt-1 pb-0.5 space-y-[1px]">
+          <div key={mountKey} className="relative ps-4 pe-0 pt-1 pb-0.5 space-y-[1px]">
             {/* Gradient rail — fades at the endpoints so it doesn't
                 bleed into the trigger above or the sibling row below. */}
             <div
-              className="pointer-events-none absolute left-[15px] top-0 bottom-0 w-px
+              className="pointer-events-none absolute start-[15px] top-0 bottom-0 w-px
                          bg-gradient-to-b from-transparent via-foreground/15 to-transparent
                          dark:via-white/[0.09]"
             />
@@ -864,7 +898,7 @@ function ResourceDropdown({ items, label }: { items: ResourceItem[]; label: stri
               const inner = (
                 <span
                   className={cn(
-                    "group/item relative flex w-full items-center gap-2.5 pl-3 pr-2 h-[28px] rounded-md",
+                    "group/item relative flex w-full items-center gap-2.5 ps-3 pe-2 h-[28px] rounded-md",
                     "transition-[background-color,color] duration-150",
                     item.active
                       ? "bg-foreground/[0.06] text-foreground dark:bg-white/[0.07]"
@@ -873,12 +907,12 @@ function ResourceDropdown({ items, label }: { items: ResourceItem[]; label: stri
                 >
                   {/* Active caret bar sits exactly on the rail axis. */}
                   {item.active && (
-                    <span className="absolute left-[-1px] top-[7px] bottom-[7px] w-[2px] rounded-full bg-foreground/55" />
+                    <span className="absolute start-[-1px] top-[7px] bottom-[7px] w-[2px] rounded-full bg-foreground/55" />
                   )}
                   <span className="relative shrink-0 flex items-center justify-center w-4 h-4">
                     {item.icon}
                     {item.dot && (
-                      <span className="absolute -top-0.5 -right-0.5 h-1.5 w-1.5 rounded-full bg-emerald-500 ring-[1.5px] ring-sidebar dark:bg-emerald-400" />
+                      <span className="absolute -top-0.5 -end-0.5 h-1.5 w-1.5 rounded-full bg-emerald-500 ring-[1.5px] ring-sidebar dark:bg-emerald-400" />
                     )}
                   </span>
                   <span className="flex-1 truncate text-[12px] font-medium tracking-[-0.01em] text-left">
@@ -911,6 +945,7 @@ function ResourceDropdown({ items, label }: { items: ResourceItem[]; label: stri
                   <button
                     key={item.id}
                     id={item.id}
+                    data-testid={item.testId}
                     type="button"
                     className={rowClass}
                     style={rowStyle}
@@ -927,6 +962,7 @@ function ResourceDropdown({ items, label }: { items: ResourceItem[]; label: stri
                 <Link
                   key={item.id}
                   id={item.id}
+                  data-testid={item.testId}
                   href={item.href}
                   className={rowClass}
                   style={rowStyle}
@@ -945,7 +981,7 @@ function ResourceDropdown({ items, label }: { items: ResourceItem[]; label: stri
 
 // ─── ResourcesFlyout ─────────────────────────────────────────────
 //   Collapsed-sidebar affordance for the resources group. A single
-//   IconStack2 button with an emerald dot if anything is live; on
+//   IconBrandStackoverflow button with an emerald dot if anything is live; on
 //   click, a compact popover reveals the same three destinations.
 //   Matches the visual language of the inline dropdown so the two
 //   modes feel like the same component at different scales.
@@ -958,6 +994,9 @@ function ResourcesFlyout({
   dot: boolean
   anyActive: boolean
 }) {
+  // Localized group label — "Resources" internally, displayed as the
+  // translated "Agent" (see the `sidebar.resources` message key).
+  const t = useTranslations("sidebar")
   const [open, setOpen] = useState(false)
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -967,7 +1006,7 @@ function ResourcesFlyout({
             <button
               id="sidebar-resources-collapsed"
               type="button"
-              aria-label="Resources"
+              aria-label={t("resources")}
               className={cn(
                 "group/trig relative flex w-full items-center gap-2.5 px-2 h-[30px] rounded-lg",
                 "transition-[background-color,color] duration-200 ease-out",
@@ -978,7 +1017,7 @@ function ResourcesFlyout({
               )}
             >
               <span className="relative shrink-0 flex items-center justify-center w-4 h-4">
-                <IconStack2 size={16} stroke={1.5} />
+                <IconBrandStackoverflow size={16} stroke={1.5} />
                 {dot && (
                   <span className="absolute -top-0.5 -right-0.5 h-1.5 w-1.5 rounded-full bg-emerald-500 ring-[1.5px] ring-sidebar dark:bg-emerald-400" />
                 )}
@@ -988,7 +1027,7 @@ function ResourcesFlyout({
         </TooltipTrigger>
         {!open && (
           <TooltipContent side="right" sideOffset={8}>
-            <span className="font-medium text-[12px]">Resources</span>
+            <span className="font-medium text-[12px]">{t("resources")}</span>
           </TooltipContent>
         )}
       </Tooltip>
@@ -1000,7 +1039,7 @@ function ResourcesFlyout({
       >
         <div className="px-2.5 pt-2 pb-1.5">
           <span className="text-[10px] font-semibold tracking-[0.08em] uppercase text-muted-foreground">
-            Resources
+            {t("resources")}
           </span>
         </div>
         <div className="h-px bg-border/40 dark:bg-white/[0.05] mx-1 mb-1" />
@@ -1048,6 +1087,7 @@ function ResourcesFlyout({
               return (
                 <button
                   key={item.id}
+                  data-testid={item.testId}
                   type="button"
                   className={rowClass}
                   style={rowStyle}
@@ -1064,6 +1104,7 @@ function ResourcesFlyout({
             return (
               <Link
                 key={item.id}
+                data-testid={item.testId}
                 href={item.href}
                 className={rowClass}
                 style={rowStyle}
@@ -1106,6 +1147,20 @@ export const SidebarNavSection = memo(function SidebarNavSection({
   const { chats: allChats } = useChats()
   const { stats: machineStats } = useSidebarMachines(user)
 
+  // Developer platform mode → reveals the "Developer" nav section. Gate on
+  // mount: the platform-mode store hydrates eagerly from localStorage on the
+  // client, so reading `mode` during the SSR / first-paint (consumer default)
+  // render and then flipping to "developer" would cause a hydration mismatch.
+  // See lib/platform-mode-store.ts. The flag for the *public* developer
+  // surface still lives in lib/feature-flags.ts; this is the in-app surface.
+  const platformMode = usePlatformMode((s) => s.mode)
+  // Same store action the header switcher calls — the in-sidebar "Developer"
+  // row below flips the platform exactly the way the switcher does.
+  const setPlatformMode = usePlatformMode((s) => s.setMode)
+  const [devModeMounted, setDevModeMounted] = useState(false)
+  useEffect(() => setDevModeMounted(true), [])
+  const isDeveloperMode = devModeMounted && platformMode === "developer"
+
   // Memory quick-edit popup is opened from the "Memory" entry in the
   // Resources group (both expanded inline and collapsed flyout modes).
   //
@@ -1146,22 +1201,48 @@ export const SidebarNavSection = memo(function SidebarNavSection({
 
   return (
     <>
-      {/* New Task */}
-      <div className={cn("relative", expanded ? "pb-1 mb-0.5" : "pb-1 mb-0.5")}>
+      {/* Primary action — the ONE CTA that lives outside both ModeReveals so
+          it stays put as a stable anchor while everything below it cross-fades
+          between modes. It morphs between "New task" (Personal → home) and
+          "New API key" (Developer → keys page, auto-opening the create dialog
+          via ?new=1). The icon and label cross-fade on the mode flip (keyed
+          spans), so the swap reads as a morph rather than a hard cut. */}
+      <div className="relative pb-1 mb-0.5">
         <NavButton
-          icon={<IconPlus size={16} stroke={2} className="shrink-0" />}
-          label={t("newTask")}
-          tooltip={t("newTaskDescription")}
-          onClick={() => handleNavigation(() => router.push("/"))}
+          icon={
+            <span
+              key={isDeveloperMode ? "dev" : "consumer"}
+              className="flex items-center justify-center animate-in fade-in-0 zoom-in-90 duration-200"
+            >
+              {isDeveloperMode
+                ? <IconKey size={16} stroke={2} className="shrink-0" />
+                : <IconPlus size={16} stroke={2} className="shrink-0" />}
+            </span>
+          }
+          label={
+            <span
+              key={isDeveloperMode ? "dev" : "consumer"}
+              className="block animate-in fade-in-0 duration-200"
+            >
+              {isDeveloperMode ? "New API key" : t("newTask")}
+            </span>
+          }
+          tooltip={isDeveloperMode ? "Create a new API key" : t("newTaskDescription")}
+          onClick={() =>
+            isDeveloperMode
+              ? handleNavigation(() => router.push("/developers/keys?new=1"))
+              : handleNavigation(() => router.push("/"))
+          }
           variant="primary"
         />
       </div>
 
-      {/* ── Group 1 · Recent work ─────────────────────────────────
-          History first (highest frequency return destination),
-          then Swarms (its specialized parallel-runs sibling).
-          The section header itself separates this group from the
-          New Task button — no extra hairline needed. */}
+      {/* Personal-mode sections — Recent work + Workspace (Apps · Agent). Both
+          collapse away together with a smooth height/opacity transition when
+          the user switches into Developer mode, so Developer mode shows only
+          the New-API-key button above and the Developer section below. */}
+      <ModeReveal show={!isDeveloperMode}>
+      {/* ── Group 1 · Recent work ── */}
       <SectionHeader label="Recent" expanded={expanded} />
       <div className="space-y-0.5">
         <NavButton
@@ -1199,19 +1280,35 @@ export const SidebarNavSection = memo(function SidebarNavSection({
         />
       </div>
 
+      {/* ── Group 2 · Workspace (Apps · Agent) ── */}
       <SectionHeader label="Workspace" expanded={expanded} />
 
-      {/* ── Group 2 · Resources ───────────────────────────────────
-          Expanded: a collapsible "Resources" row with a rotating
-          caret that expands inline to show Computers / Schedules /
-          Credentials along a gradient rail. Defaults closed so the
-          caret is an obvious affordance; auto-opens on child routes
-          and remembers manual toggles in localStorage.
-          Collapsed: a single IconStack2 button that opens a popover
-          flyout with the same three destinations — so no items are
-          hidden in the narrow rail. Developers stays as its own
-          row below — it's a distinct destination, not a resource. */}
       <div className="space-y-0.5">
+        {/* Connections — promoted out of the Resources group to its own
+            top-level row, above the dropdown. It's the integration hub
+            users reach for most, so it earns a one-click destination
+            instead of sitting two clicks deep inside Resources. */}
+        <NavButton
+          id="sidebar-connections-link"
+          testId="sidebar-nav-connections"
+          icon={<IconAffiliate size={16} stroke={1.5} className="shrink-0" />}
+          label={t("connections")}
+          href="/connections"
+          isActive={isItemActive("/connections")}
+          accentColor="text-emerald-500 dark:text-emerald-400"
+          onClick={closeMobileIfNeeded}
+        />
+
+        {/* ── Resources ─────────────────────────────────────────────
+            Expanded: a collapsible "Resources" row whose caret expands
+            inline to show Computers / Workforce / Credentials / Memory
+            along a gradient rail. Defaults closed so the caret is an
+            obvious affordance; auto-opens on child routes and remembers
+            manual toggles in localStorage.
+            Collapsed: a single IconBrandStackoverflow button that opens a popover
+            flyout with the same destinations — so nothing is hidden in
+            the narrow rail. Developers stays as its own row below — a
+            distinct destination, not a resource. */}
         {(() => {
           const resourceItems: ResourceItem[] = [
             {
@@ -1234,7 +1331,7 @@ export const SidebarNavSection = memo(function SidebarNavSection({
             },
             {
               id: "sidebar-secrets-link",
-              icon: <IconShieldLock size={16} stroke={1.5} />,
+              icon: <IconLockPassword size={16} stroke={1.5} />,
               label: t("credentials"),
               href: "/secrets",
               active: isItemActive("/secrets"),
@@ -1247,7 +1344,7 @@ export const SidebarNavSection = memo(function SidebarNavSection({
             // dialog's footer link.
             {
               id: "sidebar-memory-action",
-              icon: <IconBrain size={16} stroke={1.5} />,
+              icon: <IconDatabase size={16} stroke={1.5} />,
               // Localized via the dedicated memory namespace so the
               // sidebar label switches with the user's language.
               label: tMemory("sidebarLabel"),
@@ -1261,7 +1358,7 @@ export const SidebarNavSection = memo(function SidebarNavSection({
           ]
           const anyResourceActive = resourceItems.some((r) => r.active)
           return expanded ? (
-            <ResourceDropdown label="Resources" items={resourceItems} />
+            <ResourceDropdown label={t("resources")} items={resourceItems} />
           ) : (
             <ResourcesFlyout
               items={resourceItems}
@@ -1270,24 +1367,128 @@ export const SidebarNavSection = memo(function SidebarNavSection({
             />
           )
         })()}
-        {DEVELOPERS_API_ENABLED && (
+
+        {/* Developer — a one-click switch into the Developer platform that
+            mirrors the header switcher exactly (usePlatformMode → "developer",
+            no navigation, side-effect free). Sits directly below Agent. It
+            lives inside the Personal ModeReveal, so flipping the mode collapses
+            this whole group away while the full Developer section below reveals
+            — the same animated transition the header switcher triggers. */}
+        <NavButton
+          id="sidebar-developer-switch"
+          testId="sidebar-nav-developer"
+          icon={<IconCode size={16} stroke={1.5} className="shrink-0" />}
+          label="Developer"
+          tooltip="Switch to the developer platform"
+          accentColor="text-purple-500 dark:text-purple-400"
+          onClick={() => setPlatformMode("developer")}
+        />
+      </div>
+      </ModeReveal>
+
+      {/* ── Developer section ──
+          Revealed only when the user switches to the Developer platform mode
+          via the sidebar-header switcher (usePlatformMode). The /developers
+          dashboard holds API keys, usage, traces, and the API reference.
+          `isDeveloperMode` is mount-gated (see above) so this never flashes
+          or triggers a hydration mismatch. The in-app developer surface — this
+          entry, the /developers page, and the guide's API tab — follows the
+          per-user runtime mode; only the public marketing surface (landing nav,
+          /api-docs) still rides DEVELOPERS_API_ENABLED. */}
+      <ModeReveal show={isDeveloperMode}>
+        {/* ── Group 1 · Build ── what you integrate with: your API keys and
+            the reference docs. Mirrors the two-section rhythm of Personal mode
+            (Recent · Workspace) so both platforms read the same way. */}
+        <SectionHeader label="Build" expanded={expanded} />
+        <div className="space-y-0.5">
           <NavButton
-            id="sidebar-developers-link"
+            id="sidebar-developers-keys-link"
+            testId="sidebar-nav-developers-keys"
             icon={<IconKey size={16} stroke={1.5} className="shrink-0" />}
-            label="Developers"
-            tooltip="API, MCP & integrations"
-            href="/developers"
-            isActive={isItemActive("/developers")}
+            label="API keys"
+            tooltip="Create & manage API keys"
+            href="/developers/keys"
+            isActive={isItemActive("/developers/keys")}
             accentColor="text-purple-500 dark:text-purple-400"
             onClick={closeMobileIfNeeded}
             hoverInfo={{
-              description: "Developers",
-              detail: "API keys, MCP, SDKs, and everything to integrate computer-use intelligence into your apps.",
+              description: "API keys",
+              detail: "Create, reveal, and revoke the keys that authenticate your API requests.",
               visual: "developers",
             }}
           />
-        )}
-      </div>
+          <NavButton
+            id="sidebar-developers-docs-link"
+            testId="sidebar-nav-developers-docs"
+            icon={<IconBook2 size={16} stroke={1.5} className="shrink-0" />}
+            label="Docs"
+            tooltip="API quick reference"
+            href="/developers/docs"
+            isActive={isItemActive("/developers/docs")}
+            accentColor="text-amber-500 dark:text-amber-400"
+            onClick={closeMobileIfNeeded}
+            hoverInfo={{
+              description: "Docs",
+              detail: "Authentication, a copyable quick start, endpoint and action tables, and response shapes.",
+              visual: "developers",
+            }}
+          />
+        </div>
+
+        {/* ── Group 2 · Monitor ── observability for what's already running:
+            request traces (Logs) and consumption (Usage). */}
+        <SectionHeader label="Monitor" expanded={expanded} />
+        <div className="space-y-0.5">
+          <NavButton
+            id="sidebar-developers-logs-link"
+            testId="sidebar-nav-developers-logs"
+            icon={<IconActivity size={16} stroke={1.5} className="shrink-0" />}
+            label="Logs"
+            tooltip="Request traces & history"
+            href="/developers/logs"
+            isActive={isItemActive("/developers/logs")}
+            accentColor="text-blue-500 dark:text-blue-400"
+            onClick={closeMobileIfNeeded}
+            hoverInfo={{
+              description: "Logs",
+              detail: "Every API request as a filterable, exportable trace: endpoint, credits, timing, and request_id.",
+              visual: "developers",
+            }}
+          />
+          <NavButton
+            id="sidebar-developers-usage-link"
+            testId="sidebar-nav-developers-usage"
+            icon={<IconChartBar size={16} stroke={1.5} className="shrink-0" />}
+            label="Usage"
+            tooltip="Requests, credits & activity"
+            href="/developers/usage"
+            isActive={isItemActive("/developers/usage")}
+            accentColor="text-emerald-500 dark:text-emerald-400"
+            onClick={closeMobileIfNeeded}
+            hoverInfo={{
+              description: "Usage",
+              detail: "Balance, request and credit totals, the activity chart, and your per-endpoint breakdown.",
+              visual: "developers",
+            }}
+          />
+          {/* Personal — the mirror of the "Developer" row in Personal mode:
+              one click back to the Personal platform (usePlatformMode →
+              "consumer"), so the platform toggle is reachable from the sidebar
+              in BOTH directions, not just the header switcher. Sits at the
+              bottom of the Developer nav — the symmetric position to where
+              "Developer" sits under Agent in Personal mode — so the option
+              flips its label between modes rather than vanishing entirely. */}
+          <NavButton
+            id="sidebar-personal-switch"
+            testId="sidebar-nav-personal"
+            icon={<IconUser size={16} stroke={1.5} className="shrink-0" />}
+            label="Personal"
+            tooltip="Switch back to the personal platform"
+            accentColor="text-blue-500 dark:text-blue-400"
+            onClick={() => setPlatformMode("consumer")}
+          />
+        </div>
+      </ModeReveal>
 
       {/* The Memory quick-edit popup is mounted at the AppSidebar root
           (a sibling of `Sidebar`, not a descendant) so it survives the

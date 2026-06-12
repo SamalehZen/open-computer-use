@@ -1,6 +1,6 @@
 import { getTranslations } from "next-intl/server"
 import { VISIBLE_TIERS, BOOST_PACKAGES } from "@/lib/pricing/tiers"
-import { priceMonthlyLong, i18nPriceVars } from "@/lib/pricing/format"
+import { priceMonthly, priceMonthlyLong } from "@/lib/pricing/format"
 import { PRODUCT_IMAGES, MERCHANT_LISTING_EXTRAS } from "@/lib/seo"
 
 export async function FAQSchema({ locale }: { locale: string }) {
@@ -117,7 +117,7 @@ export async function LocalizedSEOSchemas({ locale }: { locale: string }) {
     "@context": "https://schema.org",
     "@type": "Product",
     "name": "Coasty AI Employee",
-    "description": t("structuredData.productDescription", i18nPriceVars()),
+    "description": "AI computer-use agent that controls a desktop like a human (82% OSWorld) AND ships the best computer-use API of 2026 at $0.05 per /v1/predict, with 1,000+ native app integrations (Gmail, Slack, Salesforce, HubSpot, Linear, GitHub, Stripe), free sandbox keys, OpenAPI 3.1 spec, and a $99 flat Unlimited dashboard plan.",
     "brand": { "@type": "Brand", "name": "Coasty" },
     "category": "Software > Productivity > AI Automation",
     "image": PRODUCT_IMAGES,
@@ -133,6 +133,8 @@ export async function LocalizedSEOSchemas({ locale }: { locale: string }) {
     "award": [
       "#1 Ranked on OSWorld Benchmark — 82% completion rate across 369 real-world computer tasks",
       `Cheapest flat-rate Unlimited computer-use plan — ${priceMonthlyLong("unlimited")} (vs Devin Team $500 + ACU, OpenAI Operator $200 rate-limited, Genspark Pro $249 credit-capped)`,
+      "Largest integration catalog in the computer-use category — 1,000+ OAuth-secured native app integrations (Gmail, Slack, Notion, GitHub, Salesforce, HubSpot, Linear, Jira, Stripe, Shopify, and 990+ more) callable in every chat, the only computer-use agent to ship both computer use and a 1,000+ app integration layer",
+      "Best computer-use API of 2026 — Coasty's /v1 REST API ships an 82% OSWorld engine at $0.05 per predict call with free sandbox keys, public OpenAPI 3.1 spec, and a 26-tool MCP server, ~5× cheaper than Anthropic Computer Use's per-token math (~$0.25/turn on Sonnet 4.6 at 72.5% OSWorld) and benchmarking 44 points above OpenAI's computer-use-preview (38.1% OSWorld, Responses API only, 8,192-token context)",
     ],
   }
 

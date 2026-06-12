@@ -19,6 +19,14 @@ import {
   type Icon as PhosphorIcon,
 } from "@phosphor-icons/react"
 import { cn } from "@/lib/utils"
+import {
+  ACTION_EXECUTOR_MAP,
+  COORDINATE_SCALING_NOTE,
+  LOCAL_AUTOMATION_SNIPPETS,
+  LOCAL_SAFETY_NOTE,
+  PROMPT_PRESETS,
+  type LocalAutomationLang,
+} from "@/lib/local-automation"
 
 /* ─── animations ─── */
 
@@ -464,8 +472,12 @@ defer resp.Body.Close()`,
   -d '{
     "display_name": "automation-bot",
     "os_type": "linux",
-    "desktop_enabled": true
-  }'`,
+    "desktop_enabled": true,
+    "ttl_minutes": 240
+  }'
+# ttl_minutes (optional, 5–10080): auto-destroy lease. Extend/clear later:
+#   curl -X PATCH https://coasty.ai/v1/machines/$MACHINE_ID \\
+#     -H "X-API-Key: ..." -d '{"ttl_minutes": 480}'   # or 0 to clear`,
     action: `curl -X POST https://coasty.ai/v1/machines/$MACHINE_ID/actions \\
   -H "X-API-Key: sk-coasty-live-..." \\
   -H "Content-Type: application/json" \\
@@ -601,7 +613,8 @@ const SCHEDULES_SNIPPETS: Record<LangId, SchedulesSnippet> = {
     create: `import requests
 
 # Daily 9:00 AM ET email summary, fired by the Coasty scheduler.
-# Per-fire cost: 10 credits/min while the agent runs.
+# Per fire: needs >= 20 cr ($0.20) in your API wallet to dispatch (gate only);
+# agent runtime then bills your Coasty credit balance at 10 credits/min.
 r = requests.post(
     "https://coasty.ai/v1/schedules",
     headers={
@@ -963,6 +976,239 @@ static string SignCoastyWebhook(string secret, byte[] body) {
   },
 }
 
+/* ─── agents API snippets (task runs + workflows) ─── */
+//
+// Runs are the durable, server-driven sibling of /predict: you hand Coasty a
+// machine and a task, it runs the agent loop for you and streams lifecycle.
+// Workflows compose many runs with a versioned JSON DSL. Bodies validated
+// against backend/app/models/public_run_service + workflow_engine
+// (extra="forbid"), so every example here passes server-side validation.
+//
+// Per the docs house rules these carry python + curl for every language slot;
+// the remaining slots fall back to a short pointer the way the other snippet
+// tables in this file do.
+
+type RunsSnippet = { create: string; events: string; resume: string }
+
+const PY_RUN_CREATE = `import requests
+
+API_KEY = "sk-coasty-live-..."
+
+# Start a task run. Returns status "queued" plus a ONE-TIME webhook_secret
+# (only present when you pass webhook_url). Idempotency-Key makes retries safe.
+r = requests.post(
+    "https://coasty.ai/v1/runs",
+    headers={
+        "X-API-Key": API_KEY,
+        "Idempotency-Key": "invoice-run-4821",
+    },
+    json={
+        "machine_id": "550e8400-e29b-41d4-a716-446655440000",
+        "task": "Open the invoice in the browser and read the total.",
+        "cua_version": "v3",          # "v4" needs professional tier or above
+        "max_steps": 40,
+        "on_awaiting_human": "pause", # pause | fail | cancel
+        "webhook_url": "https://your.app/hooks/coasty",
+    },
+)
+run = r.json()
+print(run["id"], run["status"])               # ... queued
+webhook_secret = run.get("webhook_secret")    # shown once — store it now`
+
+const CURL_RUN_CREATE = `curl -X POST https://coasty.ai/v1/runs \\
+  -H "X-API-Key: sk-coasty-live-..." \\
+  -H "Content-Type: application/json" \\
+  -H "Idempotency-Key: invoice-run-4821" \\
+  -d '{
+    "machine_id": "550e8400-e29b-41d4-a716-446655440000",
+    "task": "Open the invoice in the browser and read the total.",
+    "cua_version": "v3",
+    "max_steps": 40,
+    "on_awaiting_human": "pause"
+  }'
+
+# Response (201):
+# {
+#   "id": "...",
+#   "status": "queued",
+#   "cua_version": "v3",
+#   "max_steps": 40,
+#   "on_awaiting_human": "pause",
+#   "webhook_secret": "whsec_shown_once"   <- only when webhook_url was passed
+# }`
+
+const PY_RUN_EVENTS = `import requests
+
+# Stream lifecycle as Server-Sent Events. Reconnect with Last-Event-ID to
+# replay everything after the last seq you saw — no gaps on a dropped socket.
+with requests.get(
+    f"https://coasty.ai/v1/runs/{run_id}/events",
+    headers={"X-API-Key": API_KEY, "Last-Event-ID": "42"},
+    stream=True,
+) as r:
+    for line in r.iter_lines(decode_unicode=True):
+        if line.startswith("data:"):
+            print(line[5:].strip())   # status / step / awaiting_human / terminal`
+
+const CURL_RUN_EVENTS = `# -N disables curl buffering so events arrive live.
+curl -N https://coasty.ai/v1/runs/$RUN_ID/events \\
+  -H "X-API-Key: sk-coasty-live-..." \\
+  -H "Last-Event-ID: 42"
+
+# id: 43
+# event: status
+# data: {"status":"running"}
+#
+# id: 51
+# event: awaiting_human
+# data: {"awaiting_human_reason":"Confirm the payment amount"}`
+
+const PY_RUN_RESUME = `import requests
+
+# Cancel a run at any non-terminal state.
+requests.post(f"https://coasty.ai/v1/runs/{run_id}/cancel",
+              headers={"X-API-Key": API_KEY})
+
+# Resume ONLY works when status == "awaiting_human" (human takeover). Resuming
+# any other state returns 409 NOT_AWAITING_HUMAN.
+requests.post(
+    f"https://coasty.ai/v1/runs/{run_id}/resume",
+    headers={"X-API-Key": API_KEY},
+    json={"note": "Approved by ops; the total is correct."},
+)`
+
+const CURL_RUN_RESUME = `# Cancel
+curl -X POST https://coasty.ai/v1/runs/$RUN_ID/cancel \\
+  -H "X-API-Key: sk-coasty-live-..."
+
+# Resume — only valid while status == awaiting_human, else 409 NOT_AWAITING_HUMAN
+curl -X POST https://coasty.ai/v1/runs/$RUN_ID/resume \\
+  -H "X-API-Key: sk-coasty-live-..." \\
+  -H "Content-Type: application/json" \\
+  -d '{"note": "Approved by ops; the total is correct."}'`
+
+const RUNS_SNIPPETS: Record<LangId, RunsSnippet> = {
+  python:     { create: PY_RUN_CREATE, events: PY_RUN_EVENTS, resume: PY_RUN_RESUME },
+  curl:       { create: CURL_RUN_CREATE, events: CURL_RUN_EVENTS, resume: CURL_RUN_RESUME },
+  javascript: { create: CURL_RUN_CREATE, events: CURL_RUN_EVENTS, resume: CURL_RUN_RESUME },
+  go:         { create: CURL_RUN_CREATE, events: CURL_RUN_EVENTS, resume: CURL_RUN_RESUME },
+  ruby:       { create: CURL_RUN_CREATE, events: CURL_RUN_EVENTS, resume: CURL_RUN_RESUME },
+  php:        { create: CURL_RUN_CREATE, events: CURL_RUN_EVENTS, resume: CURL_RUN_RESUME },
+  java:       { create: CURL_RUN_CREATE, events: CURL_RUN_EVENTS, resume: CURL_RUN_RESUME },
+  csharp:     { create: CURL_RUN_CREATE, events: CURL_RUN_EVENTS, resume: CURL_RUN_RESUME },
+}
+
+type WorkflowsSnippet = { create: string; run: string }
+
+const PY_WF_CREATE = `import requests
+
+# A workflow is a versioned JSON DSL composing many runs with branching,
+# loops, parallelism, asserts, retries, and human approvals. {{var}} pulls
+# from earlier steps' results (bound via save_as / step id).
+r = requests.post(
+    "https://coasty.ai/v1/workflows",
+    headers={
+        "X-API-Key": "sk-coasty-live-...",
+        "Idempotency-Key": "ar-collections-v1",
+    },
+    json={
+        "name": "AR collections",
+        "definition": {
+            "steps": [
+                {"id": "invoice", "type": "task", "save_as": "invoice",
+                 "machine_id": "550e8400-e29b-41d4-a716-446655440000",
+                 "task": "Open the invoice and read its status + total."},
+                {"id": "check", "type": "assert",
+                 "condition": {"op": "truthy", "value": "{{invoice.passed}}"},
+                 "message": "Agent failed to read the invoice"},
+                {"id": "branch", "type": "if",
+                 "condition": {"op": "contains",
+                               "left": "{{invoice.result}}", "right": "PAID"},
+                 "then": [{"id": "ok", "type": "succeed",
+                           "output": {"state": "paid"}}],
+                 "else": [{"id": "ask", "type": "human_approval",
+                           "message": "Invoice unpaid — send reminder?"},
+                          {"id": "fin", "type": "succeed",
+                           "output": {"state": "reminded"}}]},
+            ]
+        },
+    },
+)
+workflow = r.json()
+print(workflow["id"], workflow["version"])`
+
+const CURL_WF_CREATE = `curl -X POST https://coasty.ai/v1/workflows \\
+  -H "X-API-Key: sk-coasty-live-..." \\
+  -H "Content-Type: application/json" \\
+  -H "Idempotency-Key: ar-collections-v1" \\
+  -d '{
+    "name": "AR collections",
+    "definition": {
+      "steps": [
+        { "id": "invoice", "type": "task", "save_as": "invoice",
+          "machine_id": "550e8400-e29b-41d4-a716-446655440000",
+          "task": "Open the invoice and read its status + total." },
+        { "id": "check", "type": "assert",
+          "condition": { "op": "truthy", "value": "{{invoice.passed}}" } },
+        { "id": "branch", "type": "if",
+          "condition": { "op": "contains",
+            "left": "{{invoice.result}}", "right": "PAID" },
+          "then": [{ "id": "ok", "type": "succeed",
+            "output": { "state": "paid" } }] }
+      ]
+    }
+  }'`
+
+const PY_WF_RUN = `import requests
+
+# Start a run of a SAVED workflow ...
+r = requests.post(
+    f"https://coasty.ai/v1/workflows/{workflow_id}/runs",
+    headers={"X-API-Key": "sk-coasty-live-...", "Idempotency-Key": "wf-run-9"},
+    json={"inputs": {"invoice_url": "https://billing.example.com/inv/42"}},
+)
+wf_run = r.json()
+print(wf_run["id"], wf_run["status"])   # ... queued
+
+# ... or run an AD-HOC inline definition without saving it first:
+requests.post(
+    "https://coasty.ai/v1/workflows/runs",
+    headers={"X-API-Key": "sk-coasty-live-..."},
+    json={"definition": {"steps": [
+        {"id": "t", "type": "task",
+         "machine_id": "550e8400-e29b-41d4-a716-446655440000",
+         "task": "Take a screenshot and describe the screen."}]}},
+)`
+
+const CURL_WF_RUN = `# Start a saved workflow
+curl -X POST https://coasty.ai/v1/workflows/$WORKFLOW_ID/runs \\
+  -H "X-API-Key: sk-coasty-live-..." \\
+  -H "Content-Type: application/json" \\
+  -H "Idempotency-Key: wf-run-9" \\
+  -d '{"inputs": {"invoice_url": "https://billing.example.com/inv/42"}}'
+
+# Ad-hoc inline run (no saved workflow needed)
+curl -X POST https://coasty.ai/v1/workflows/runs \\
+  -H "X-API-Key: sk-coasty-live-..." \\
+  -H "Content-Type: application/json" \\
+  -d '{"definition": {"steps": [
+    {"id": "t", "type": "task",
+     "machine_id": "550e8400-e29b-41d4-a716-446655440000",
+     "task": "Take a screenshot and describe the screen."}]}}'
+
+# Inspect + control:  GET /v1/workflows/runs/{id} · /cancel · /resume`
+
+const WORKFLOWS_SNIPPETS: Record<LangId, WorkflowsSnippet> = {
+  python:     { create: PY_WF_CREATE, run: PY_WF_RUN },
+  curl:       { create: CURL_WF_CREATE, run: CURL_WF_RUN },
+  javascript: { create: CURL_WF_CREATE, run: CURL_WF_RUN },
+  go:         { create: CURL_WF_CREATE, run: CURL_WF_RUN },
+  ruby:       { create: CURL_WF_CREATE, run: CURL_WF_RUN },
+  php:        { create: CURL_WF_CREATE, run: CURL_WF_RUN },
+  java:       { create: CURL_WF_CREATE, run: CURL_WF_RUN },
+  csharp:     { create: CURL_WF_CREATE, run: CURL_WF_RUN },
+}
+
 /* ─── gradient palettes for sections ─── */
 
 const SECTION_GRADIENTS = [
@@ -1066,7 +1312,7 @@ type DocSection = {
   id: string
   title: string
   icon: PhosphorIcon
-  group: "Start" | "Predict" | "Machines" | "Schedules" | "MCP" | "Errors"
+  group: "Start" | "Predict" | "Local" | "Machines" | "Agents" | "Schedules" | "MCP" | "Errors"
 }
 
 const DOC_SECTIONS: DocSection[] = [
@@ -1081,12 +1327,24 @@ const DOC_SECTIONS: DocSection[] = [
   { id: "options",                title: "Request Options",        icon: Textbox,       group: "Predict" },
   { id: "endpoints",              title: "Predict Endpoints",      icon: Terminal,      group: "Predict" },
 
+  // ── Local automation (bring your own screen — no VM required) ──
+  { id: "local-overview",         title: "Automate Any Screen",    icon: CursorClick,   group: "Local" },
+  { id: "local-loop",             title: "The Local Agent Loop",   icon: Lightning,     group: "Local" },
+  { id: "local-presets",          title: "Prompt Presets",         icon: Textbox,       group: "Local" },
+
   // ── Machines API (the managed-VM surface) ──
   { id: "machines-overview",      title: "Overview & Scopes",      icon: Plugs,         group: "Machines" },
   { id: "machines-provision",     title: "Provision & Lifecycle",  icon: Lightning,     group: "Machines" },
   { id: "machines-actions",       title: "Actions & Batches",      icon: CursorClick,   group: "Machines" },
   { id: "machines-subapi",        title: "Browser, Terminal, Files", icon: Terminal,    group: "Machines" },
   { id: "machines-endpoints",     title: "Machines Endpoints",     icon: ListBullets,   group: "Machines" },
+
+  // ── Agents API (task runs + workflow orchestration) ──
+  { id: "agents-overview",        title: "Overview & Scopes",      icon: Plugs,         group: "Agents" },
+  { id: "agents-runs",            title: "Task Runs",              icon: Lightning,     group: "Agents" },
+  { id: "agents-runs-events",     title: "Run Events & Webhooks",  icon: Terminal,      group: "Agents" },
+  { id: "agents-workflows",       title: "Workflows & DSL",        icon: CursorClick,   group: "Agents" },
+  { id: "agents-endpoints",       title: "Agents Endpoints",       icon: ListBullets,   group: "Agents" },
 
   // ── Schedules API (cron + webhooks + chains) ──
   { id: "schedules-overview",     title: "Overview & Pricing",     icon: Plugs,         group: "Schedules" },
@@ -1385,6 +1643,174 @@ function DocsSidebar({ active }: { active: string }) {
 
 /* ─── main component ─── */
 
+/* ─── Local automation ("automate any screen") sections ─── */
+
+const LOCAL_LANGS: { id: LocalAutomationLang; label: string }[] = [
+  { id: "python", label: "Python · pyautogui" },
+  { id: "javascript", label: "Node · Playwright" },
+  { id: "curl", label: "cURL · one-shot" },
+  { id: "go", label: "Go · robotgo" },
+]
+
+const SCREEN_SOURCES = [
+  { name: "Your own desktop", how: "mss / screencapture / PowerShell — execute with pyautogui" },
+  { name: "A browser page", how: "Playwright or Puppeteer screenshot — execute with page.mouse / keyboard" },
+  { name: "A phone emulator", how: "adb exec-out screencap — execute with adb input tap / text" },
+  { name: "A remote VNC / RDP frame", how: "framebuffer grab — execute by injecting input on the remote" },
+  { name: "A Coasty cloud VM", how: "/v1/machines does the whole loop for you, screenshots included" },
+]
+
+function LocalAutomationSections() {
+  const [lang, setLang] = useState<LocalAutomationLang>("python")
+  const [presetId, setPresetId] = useState<string>(PROMPT_PRESETS[0].id)
+  const preset = PROMPT_PRESETS.find(p => p.id === presetId) ?? PROMPT_PRESETS[0]
+  const executorCol = lang === "javascript" ? "playwright" : "pyautogui"
+
+  return (
+    <>
+      {/* ─── Local: Overview ─── */}
+      <div className="py-8 mb-8">
+        <Section
+          id="local-overview"
+          title="Automate Any Screen"
+          icon={CursorClick}
+          description="predict, ground and sessions are screen-agnostic: a screenshot goes in, coordinates and actions come out. The pixels can come from anywhere — your own desktop, a browser, a phone emulator, a VNC frame. Coasty VMs are one execution target, not the only one."
+        >
+          <div className="rounded-xl border border-foreground/[0.06] bg-foreground/[0.01] overflow-hidden">
+            <div className="px-5 py-2.5 bg-foreground/[0.02] border-b border-foreground/[0.04]">
+              <span className="text-[10px] font-semibold text-muted-foreground/35 uppercase tracking-wider">Anything that renders pixels is automatable</span>
+            </div>
+            <div className="divide-y divide-foreground/[0.03]">
+              {SCREEN_SOURCES.map(s => (
+                <div key={s.name} className="flex items-start gap-3 px-5 py-3">
+                  <span className="text-[12px] font-medium text-foreground/70 w-44 shrink-0">{s.name}</span>
+                  <span className="text-[11px] text-muted-foreground/45 leading-relaxed">{s.how}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-amber-500/15 bg-amber-500/[0.04] px-5 py-4">
+            <p className="text-[11px] font-semibold text-amber-600 dark:text-amber-400 uppercase tracking-wider mb-1.5">Coordinates &amp; scaling — read this first</p>
+            <p className="text-[12px] text-muted-foreground/60 leading-relaxed">{COORDINATE_SCALING_NOTE}</p>
+          </div>
+          <div className="rounded-xl border border-foreground/[0.06] bg-foreground/[0.015] px-5 py-4">
+            <p className="text-[11px] font-semibold text-muted-foreground/50 uppercase tracking-wider mb-1.5">Safety on a real desktop</p>
+            <p className="text-[12px] text-muted-foreground/60 leading-relaxed">{LOCAL_SAFETY_NOTE}</p>
+          </div>
+        </Section>
+      </div>
+
+      <SectionDivider />
+
+      {/* ─── Local: The agent loop ─── */}
+      <div className="py-8 mb-8">
+        <Section
+          id="local-loop"
+          title="The Local Agent Loop"
+          icon={Lightning}
+          description="Screenshot → predict → execute → repeat until status leaves continue. The full pattern below runs on YOUR machine: sessions keep history server-side, the Idempotency-Key makes every step retry-safe, and the executor maps each returned action to a real input event."
+        >
+          <div className="flex flex-wrap gap-1.5 p-1.5 rounded-xl bg-foreground/[0.025] border border-foreground/[0.04] w-fit">
+            {LOCAL_LANGS.map(l => (
+              <button
+                key={l.id}
+                onClick={() => setLang(l.id)}
+                className={cn(
+                  "px-3 py-1.5 rounded-lg text-[11px] font-medium transition-all duration-150",
+                  lang === l.id
+                    ? "bg-background shadow-sm text-foreground border border-foreground/[0.06]"
+                    : "text-muted-foreground/45 hover:text-foreground/70"
+                )}
+              >
+                {l.label}
+              </button>
+            ))}
+          </div>
+
+          <GuideCodeBlock
+            label={lang === "curl" ? "one-shot — any screenshot in, actions out" : "full agent loop on your screen"}
+            code={LOCAL_AUTOMATION_SNIPPETS[lang]}
+          />
+
+          <div className="rounded-xl border border-foreground/[0.06] bg-foreground/[0.01] overflow-hidden">
+            <div className="px-5 py-2.5 bg-foreground/[0.02] border-b border-foreground/[0.04]">
+              <span className="text-[10px] font-semibold text-muted-foreground/35 uppercase tracking-wider">
+                Executing every action type {executorCol === "playwright" ? "in a browser (Playwright)" : "on a desktop (pyautogui)"}
+              </span>
+            </div>
+            <div className="divide-y divide-foreground/[0.03]">
+              {ACTION_EXECUTOR_MAP.map(row => (
+                <div key={row.actionType} className="flex flex-col sm:flex-row sm:items-start gap-1 sm:gap-3 px-5 py-3">
+                  <code className="text-[11px] font-mono text-foreground/70 w-24 shrink-0">{row.actionType}</code>
+                  <span className="text-[10px] font-mono text-muted-foreground/35 w-56 shrink-0 leading-relaxed">{row.params}</span>
+                  <code className="text-[10px] font-mono text-muted-foreground/50 leading-relaxed break-all">
+                    {executorCol === "playwright" ? row.playwright : row.pyautogui}
+                  </code>
+                </div>
+              ))}
+            </div>
+          </div>
+        </Section>
+      </div>
+
+      <SectionDivider />
+
+      {/* ─── Local: Prompt presets ─── */}
+      <div className="py-8 mb-8">
+        <Section
+          id="local-presets"
+          title="Prompt Presets"
+          icon={Textbox}
+          description="Best-practice steering for the `instructions` field — appended to the base agent prompt (unlike system_prompt, which replaces it). Pick the preset that matches your job, copy it, and pass it on session create or any predict call. Custom prompts require Starter or higher."
+        >
+          <div className="flex flex-wrap gap-1.5 p-1.5 rounded-xl bg-foreground/[0.025] border border-foreground/[0.04] w-fit">
+            {PROMPT_PRESETS.map(p => (
+              <button
+                key={p.id}
+                onClick={() => setPresetId(p.id)}
+                className={cn(
+                  "px-3 py-1.5 rounded-lg text-[11px] font-medium transition-all duration-150",
+                  presetId === p.id
+                    ? "bg-background shadow-sm text-foreground border border-foreground/[0.06]"
+                    : "text-muted-foreground/45 hover:text-foreground/70"
+                )}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+
+          <p className="text-[12px] text-muted-foreground/55 leading-relaxed">{preset.description}</p>
+
+          <GuideCodeBlock
+            label={`instructions — ${preset.label}`}
+            code={preset.instructions}
+          />
+
+          <GuideCodeBlock
+            label="using a preset"
+            code={`requests.post(f"{API}/sessions", headers=HDRS, json={
+    "cua_version": "v3",
+    "screen_width": 1280, "screen_height": 720,
+    "instructions": PRESET,   # the text above — applies to every step in the session
+})`}
+          />
+
+          <div className="rounded-xl border border-foreground/[0.06] bg-foreground/[0.015] px-5 py-4">
+            <p className="text-[12px] text-muted-foreground/55 leading-relaxed">
+              <code className="text-[11px]">instructions</code> is additive steering on top of the tuned base prompt — start here.
+              <code className="text-[11px] ml-1">system_prompt</code> fully replaces the base prompt: more power, more ways to break grounding —
+              reach for it only when a preset plus task phrasing can&apos;t express what you need. Both draw from the same per-tier
+              character budget (Starter 2,000 / Pro 4,000 / Enterprise 16,000; +1 credit / $0.01 per call when the prompt is strictly over 500 chars — exactly 500 is free).
+            </p>
+          </div>
+        </Section>
+      </div>
+    </>
+  )
+}
+
 export function APITab({ inApp }: { inApp: boolean }) {
   const [lang, setLang] = useState<LangId>("python")
   const snippet = SNIPPETS[lang]
@@ -1415,7 +1841,7 @@ export function APITab({ inApp }: { inApp: boolean }) {
           <div className="flex flex-wrap items-center gap-3">
             {inApp ? (
               <Link
-                href="/developers"
+                href="/developers/keys"
                 className="inline-flex items-center gap-2 rounded-xl px-5 py-2.5 text-sm font-semibold transition-all bg-foreground text-background hover:bg-foreground/90"
               >
                 Get API Key
@@ -1487,14 +1913,24 @@ export function APITab({ inApp }: { inApp: boolean }) {
         <motion.div variants={fadeUp}>
           <Section id="authentication" title="Authentication" icon={Key}>
             <p className="text-[13px] text-muted-foreground/55 leading-relaxed">
-              Every request needs an <code className="text-[11px] px-1.5 py-0.5 rounded-md bg-foreground/[0.04] font-mono">X-API-Key</code> header.
+              Send your key as an <code className="text-[11px] px-1.5 py-0.5 rounded-md bg-foreground/[0.04] font-mono">X-API-Key</code> header
+              <span className="text-muted-foreground/40"> or </span>
+              <code className="text-[11px] px-1.5 py-0.5 rounded-md bg-foreground/[0.04] font-mono">Authorization: Bearer</code>.
               {inApp ? (
-                <> Create keys in your <Link href="/developers" className="underline underline-offset-2 hover:text-foreground transition-colors">Developer Dashboard</Link>.</>
+                <> Create keys in your <Link href="/developers/keys" className="underline underline-offset-2 hover:text-foreground transition-colors">Developer Dashboard</Link>.</>
               ) : (
                 <> Sign up to create API keys.</>
-              )} Credits are deducted per request from your shared balance.
+              )} Charges debit your prepaid developer API wallet (1 credit = 1¢ = $0.01) — separate from your Coasty app subscription, even on Unlimited. Fees are charged before execution and auto-refunded on failure.
             </p>
-            <GuideCodeBlock label="header" code="X-API-Key: sk-coasty-live-your_key_here" />
+            <GuideCodeBlock label="header" code={`X-API-Key: sk-coasty-live-your_key_here
+# or, equivalently:
+Authorization: Bearer sk-coasty-live-your_key_here`} />
+            <ul className="text-[12px] text-muted-foreground/50 leading-relaxed space-y-1.5 pl-1">
+              <li>· Don&apos;t paste the literal <code className="text-[11px] font-mono">&quot;Bearer &quot;</code> prefix into an <code className="text-[11px] font-mono">X-API-Key</code> value.</li>
+              <li>· Billed success responses carry <code className="text-[11px] font-mono">X-Credits-Charged</code> + <code className="text-[11px] font-mono">X-Credits-Remaining</code>; the body <code className="text-[11px] font-mono">usage</code> has <code className="text-[11px] font-mono">credits_charged</code> + <code className="text-[11px] font-mono">cost_cents</code> (both 0 on test keys).</li>
+              <li>· Test keys (<code className="text-[11px] font-mono">sk-coasty-test-</code>) never bill and use mock VMs; the wire format matches production.</li>
+              <li>· POST runs / machines / workflows / schedules accept an <code className="text-[11px] font-mono">Idempotency-Key</code> header so retries are safe.</li>
+            </ul>
           </Section>
         </motion.div>
 
@@ -1575,10 +2011,15 @@ export function APITab({ inApp }: { inApp: boolean }) {
   "usage": {
     "input_tokens": 1523,
     "output_tokens": 245,
-    "credits_charged": 5
+    "credits_charged": 5,
+    "cost_cents": 5
   }
 }`}
           />
+          <p className="text-[11px] text-muted-foreground/45 leading-relaxed">
+            Billed responses also carry <code className="text-[11px] font-mono">X-Credits-Charged</code> + <code className="text-[11px] font-mono">X-Credits-Remaining</code> headers.
+            On a <code className="text-[11px] font-mono">sk-coasty-test-</code> key, <code className="text-[11px] font-mono">credits_charged</code> and <code className="text-[11px] font-mono">cost_cents</code> are both 0.
+          </p>
         </Section>
       </div>
 
@@ -1616,7 +2057,7 @@ export function APITab({ inApp }: { inApp: boolean }) {
               {[
                 { f: "screenshot", t: "string", req: true },
                 { f: "instruction", t: "string", req: true },
-                { f: "cua_version", t: '"v3" | "v1"', req: false },
+                { f: "cua_version", t: '"v3" | "v4" | "v1" (+3 cr)', req: false },
                 { f: "screen_width", t: "int", req: false },
                 { f: "screen_height", t: "int", req: false },
                 { f: "max_actions", t: "int (1-10)", req: false },
@@ -1675,7 +2116,6 @@ export function APITab({ inApp }: { inApp: boolean }) {
             <div className="divide-y divide-foreground/[0.03]">
               {[
                 { m: "POST", p: "/v1/ground", d: "Find (x,y) for element", c: "3 cr" },
-                { m: "POST", p: "/v1/ocr", d: "Extract text from image", c: "3 cr" },
                 { m: "POST", p: "/v1/parse", d: "Parse pyautogui code", c: "Free" },
               ].map(row => (
                 <div key={`${row.m} ${row.p}`} className="flex items-center gap-3 px-5 py-3">
@@ -1710,8 +2150,39 @@ export function APITab({ inApp }: { inApp: boolean }) {
               ))}
             </div>
           </div>
+          <div className="rounded-xl border border-foreground/[0.06] bg-foreground/[0.01] overflow-hidden">
+            <div className="px-5 py-2.5 bg-foreground/[0.02] border-b border-foreground/[0.04]">
+              <span className="text-[10px] font-semibold text-muted-foreground/35 uppercase tracking-wider">Surcharges — added to the base fee</span>
+            </div>
+            <div className="divide-y divide-foreground/[0.03]">
+              {[
+                { r: "Per trajectory screenshot (each prior image sent)",                    c: "+2 cr ($0.02)" },
+                { r: "Per HD image — strictly larger than 1280×720 (current + trajectory)",  c: "+1 cr ($0.01)" },
+                { r: 'v1 engine (cua_version: "v1") — v3 / v4 add nothing',                  c: "+3 cr ($0.03)" },
+                { r: "system_prompt over 500 chars (exactly 500 = no fee)",                  c: "+1 cr ($0.01)" },
+              ].map(row => (
+                <div key={row.r} className="flex items-center gap-3 px-5 py-2.5">
+                  <span className="text-[11px] text-muted-foreground/55 flex-1">{row.r}</span>
+                  <code className="text-[10px] font-mono text-foreground/55 shrink-0">{row.c}</code>
+                </div>
+              ))}
+            </div>
+            <div className="px-5 py-3 text-[10px] text-muted-foreground/45 leading-relaxed border-t border-foreground/[0.04]">
+              1 credit = $0.01. Base fees: predict 5 cr ($0.05) · session create 10 cr ($0.10, never carries surcharges) · session predict 4 cr ($0.04) · ground 3 cr ($0.03, HD fee only — single image) · parse Free. Charged up-front, auto-refunded if the call fails (PREDICTION_FAILED / GROUNDING_FAILED).
+            </div>
+          </div>
         </Section>
       </div>
+
+      <SectionDivider />
+
+      {/* ════════════════════════════════════════════════════════════════════
+           ═════════════════ LOCAL AUTOMATION ═════════════════
+           Bring-your-own-screen: the predict surface pointed at the user's
+           desktop / a browser / an emulator, executed locally. No VM needed.
+           ════════════════════════════════════════════════════════════════════ */}
+
+      <LocalAutomationSections />
 
       <SectionDivider />
 
@@ -1763,15 +2234,21 @@ export function APITab({ inApp }: { inApp: boolean }) {
               </div>
               <div className="divide-y divide-foreground/[0.03]">
                 {[
-                  { r: "Provision (any provider)",       c: "20 cr min" },
-                  { r: "Agent run on managed VM",         c: "10 cr/min" },
-                  { r: "Raw VM-hour (Linux)",             c: "50 cr/hr" },
-                  { r: "Raw VM-hour (Windows)",           c: "75 cr/hr" },
-                  { r: "Idle VM (provisioned, unused)",   c: "5 cr/hr" },
-                  { r: "Snapshot create",                 c: "1 cr" },
-                  { r: "Snapshot storage",                c: "1 cr / 2 GB-mo" },
-                  { r: "Egress (after first 10 GB/mo)",   c: "1 cr/GB" },
-                  { r: "Sandbox (sk-coasty-test-*)",      c: "Free" },
+                  // Runtime is metered per minute (whole credits, floor —
+                  // partial credits never billed) against the API wallet:
+                  // a small fixed surplus over the underlying cloud cost.
+                  // Source of truth: backend machine_runtime_billing.py +
+                  // GET /v1/machines/pricing.
+                  { r: "Provision — wallet gate, no fee",          c: "20 cr ($0.20) min" },
+                  { r: "VM runtime — Linux, running",              c: "5 cr/hr ($0.05)" },
+                  { r: "VM runtime — Windows, running",            c: "9 cr/hr ($0.09)" },
+                  { r: "starting / stopping / restarting",         c: "running rate" },
+                  { r: "VM stopped or suspended (storage only)",   c: "1 cr/hr ($0.01)" },
+                  { r: "creating / error / terminated",            c: "Free" },
+                  { r: "Auto-destroy TTL (ttl_minutes)",           c: "Free" },
+                  { r: "Snapshot create (one-time)",               c: "1 cr ($0.01)" },
+                  { r: "Out of funds → VM auto-stopped",           c: "never destroyed" },
+                  { r: "Sandbox (sk-coasty-test-*)",               c: "Free" },
                 ].map(row => (
                   <div key={row.r} className="flex items-center gap-3 px-5 py-2.5">
                     <span className="text-[11px] text-muted-foreground/55 flex-1 truncate">{row.r}</span>
@@ -1779,6 +2256,9 @@ export function APITab({ inApp }: { inApp: boolean }) {
                   </div>
                 ))}
               </div>
+                <div className="px-5 py-3 text-[10px] text-muted-foreground/45 leading-relaxed border-t border-foreground/[0.04]">
+                  Metered per minute against your API wallet (1 cr = $0.01), rounded down — partial minutes and partial credits are never billed. All per-call machine endpoints (actions, batch, terminal, browser, files, screenshot, connection, lifecycle) are Free — you pay only the hourly runtime. Live table: GET /v1/machines/pricing.
+                </div>
             </div>
           </div>
 
@@ -1804,7 +2284,7 @@ export function APITab({ inApp }: { inApp: boolean }) {
           id="machines-provision"
           title="Provision & Lifecycle"
           icon={Lightning}
-          description="Create a VM, list your fleet, and control start/stop/snapshot/terminate. Sandbox keys mock everything in-memory; live keys provision real EC2 / Azure instances."
+          description="Create a VM, list your fleet, and control start/stop/restart/snapshot/terminate. Set ttl_minutes for auto-destroy (extend or clear any time via PATCH). Runtime bills your API wallet per minute at a small surplus over cloud cost. Sandbox keys mock everything in-memory; live keys provision real EC2 / Azure instances."
         >
           <GuideCodeBlock label={`provision a vm — ${lang}`} code={MACHINES_SNIPPETS[lang].provision} />
 
@@ -1816,8 +2296,11 @@ export function APITab({ inApp }: { inApp: boolean }) {
               {[
                 { m: "GET",    p: "/v1/machines",                d: "List your machines" },
                 { m: "GET",    p: "/v1/machines/{id}",           d: "Get a machine" },
+                { m: "GET",    p: "/v1/machines/pricing",        d: "Runtime + one-time price table" },
+                { m: "PATCH",  p: "/v1/machines/{id}",           d: "Set / extend / clear auto-destroy TTL" },
                 { m: "POST",   p: "/v1/machines/{id}/start",     d: "Start a stopped VM" },
                 { m: "POST",   p: "/v1/machines/{id}/stop",      d: "Stop a running VM" },
+                { m: "POST",   p: "/v1/machines/{id}/restart",   d: "Restart a running VM" },
                 { m: "POST",   p: "/v1/machines/{id}/snapshot",  d: "Create AMI snapshot" },
                 { m: "DELETE", p: "/v1/machines/{id}",           d: "Terminate (irreversible)" },
               ].map(row => (
@@ -1826,6 +2309,7 @@ export function APITab({ inApp }: { inApp: boolean }) {
                     "shrink-0 w-14 text-center text-[10px] font-bold tracking-wider py-0.5 rounded",
                     row.m === "GET"    ? "bg-blue-500/10 text-blue-600 dark:text-blue-400" :
                     row.m === "POST"   ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" :
+                    row.m === "PATCH"  ? "bg-amber-500/10 text-amber-600 dark:text-amber-400" :
                                          "bg-rose-500/10 text-rose-600 dark:text-rose-400"
                   )}>
                     {row.m}
@@ -2010,12 +2494,15 @@ Returns:
             </div>
             <div className="divide-y divide-foreground/[0.03]">
               {[
-                { m: "POST",   p: "/v1/machines",                  d: "Provision a new VM",       c: "20 cr min" },
+                { m: "POST",   p: "/v1/machines",                  d: "Provision (runtime 5–9 cr/hr)", c: "20 cr gate" },
                 { m: "GET",    p: "/v1/machines",                  d: "List machines",             c: "Free" },
                 { m: "GET",    p: "/v1/machines/{id}",             d: "Get a machine",             c: "Free" },
+                { m: "GET",    p: "/v1/machines/pricing",          d: "Runtime price table",       c: "Free" },
+                { m: "PATCH",  p: "/v1/machines/{id}",             d: "Set / clear auto-destroy TTL", c: "Free" },
                 { m: "DELETE", p: "/v1/machines/{id}",             d: "Terminate (irreversible)",  c: "Free" },
                 { m: "POST",   p: "/v1/machines/{id}/start",       d: "Start stopped VM",          c: "Free" },
-                { m: "POST",   p: "/v1/machines/{id}/stop",        d: "Stop running VM",           c: "Free" },
+                { m: "POST",   p: "/v1/machines/{id}/stop",        d: "Stop running VM (1 cr/hr stopped)", c: "Free" },
+                { m: "POST",   p: "/v1/machines/{id}/restart",     d: "Restart running VM",        c: "Free" },
                 { m: "POST",   p: "/v1/machines/{id}/snapshot",    d: "Create AMI snapshot",       c: "1 cr" },
               ].map(row => (
                 <div key={`${row.m} ${row.p}`} className="flex items-center gap-3 px-5 py-3">
@@ -2023,6 +2510,7 @@ Returns:
                     "shrink-0 w-14 text-center text-[10px] font-bold tracking-wider py-0.5 rounded",
                     row.m === "GET"    ? "bg-blue-500/10 text-blue-600 dark:text-blue-400" :
                     row.m === "POST"   ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" :
+                    row.m === "PATCH"  ? "bg-amber-500/10 text-amber-600 dark:text-amber-400" :
                                          "bg-rose-500/10 text-rose-600 dark:text-rose-400"
                   )}>
                     {row.m}
@@ -2084,6 +2572,384 @@ Returns:
       <SectionDivider />
 
       {/* ════════════════════════════════════════════════════════════════════
+           ═════════════════ AGENTS API ═════════════════
+           Durable, server-driven task runs (the async sibling of /predict) and
+           workflow orchestration over a versioned JSON DSL. Each section reuses
+           the SAME `lang` selector so a reader picks a language once.
+           ════════════════════════════════════════════════════════════════════ */}
+
+      {/* ─── Agents: Overview & Scopes ─── */}
+      <div className="py-8 mb-8">
+        <Section
+          id="agents-overview"
+          title="Agents API"
+          icon={Plugs}
+          description="Hand Coasty a machine and a task; it drives the agent loop for you, streams lifecycle, and pauses for a human when needed. Workflows compose many runs with a versioned JSON DSL. Sandbox keys (sk-coasty-test-*) run against mock VMs with no billing."
+        >
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* Scopes card */}
+            <div className="rounded-xl border border-foreground/[0.06] bg-foreground/[0.01] overflow-hidden">
+              <div className="px-5 py-2.5 bg-foreground/[0.02] border-b border-foreground/[0.04]">
+                <span className="text-[10px] font-semibold text-muted-foreground/35 uppercase tracking-wider">Scopes</span>
+              </div>
+              <div className="divide-y divide-foreground/[0.03]">
+                {[
+                  { s: "runs:read",       d: "list, get, stream run events" },
+                  { s: "runs:write",      d: "start, cancel, resume (human takeover)" },
+                  { s: "workflows:read",  d: "list/get workflows + workflow runs" },
+                  { s: "workflows:write", d: "create, update, delete, start runs" },
+                ].map(row => (
+                  <div key={row.s} className="flex items-center gap-3 px-5 py-2.5">
+                    <code className="text-[11px] font-mono font-semibold text-foreground/65 w-36 shrink-0 truncate">{row.s}</code>
+                    <span className="text-[11px] text-muted-foreground/45 flex-1 truncate">{row.d}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="px-5 py-3 text-[10px] text-muted-foreground/45 leading-relaxed border-t border-foreground/[0.04]">
+                All four are granted to new keys by default. Run/workflow ids are
+                mode-isolated: a test key never sees a live id and vice versa.
+              </div>
+            </div>
+
+            {/* Concepts card */}
+            <div className="rounded-xl border border-foreground/[0.06] bg-foreground/[0.01] overflow-hidden">
+              <div className="px-5 py-2.5 bg-foreground/[0.02] border-b border-foreground/[0.04]">
+                <span className="text-[10px] font-semibold text-muted-foreground/35 uppercase tracking-wider">Two primitives</span>
+              </div>
+              <div className="divide-y divide-foreground/[0.03]">
+                {[
+                  { n: "Run", d: "One task on one machine. Coasty runs the agent loop, streams events, and emits HMAC-signed lifecycle webhooks." },
+                  { n: "Workflow", d: "A versioned JSON DSL that composes many runs: task · assert · if · loop · parallel · human_approval · retry · succeed · fail." },
+                ].map(row => (
+                  <div key={row.n} className="px-5 py-3">
+                    <div className="text-[11px] font-semibold text-foreground/70 mb-1">{row.n}</div>
+                    <div className="text-[11px] text-muted-foreground/55 leading-relaxed">{row.d}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-5 rounded-xl border border-amber-500/15 bg-amber-500/[0.03] px-5 py-4">
+            <div className="flex items-start gap-3">
+              <span className="text-[10px] font-semibold text-amber-600/80 dark:text-amber-400/80 uppercase tracking-wider shrink-0 mt-0.5">Billing</span>
+              <span className="text-[12px] text-muted-foreground/55 leading-relaxed">
+                Billed responses carry <code className="text-[11px] font-mono text-foreground/65">X-Credits-Charged</code> + <code className="text-[11px] font-mono text-foreground/65">X-Credits-Remaining</code> headers,
+                and the body <code className="text-[11px] font-mono text-foreground/65">usage</code> object exposes <code className="text-[11px] font-mono text-foreground/65">credits_charged</code> + <code className="text-[11px] font-mono text-foreground/65">cost_cents</code> (both 0 on test keys).
+                Each agent step costs 5 cr ($0.05) on v3/v4 and 8 cr ($0.08) on v1, charged from your API wallet after the step completes (idempotent per step; a failed charge stops the run with WALLET_EXHAUSTED). Starting a run requires wallet balance ≥ one step&apos;s cost. Each workflow <code className="text-[11px] font-mono text-foreground/65">task</code> step is itself a run with identical per-step billing; control-flow steps (assert · if · loop · parallel · retry · human_approval · succeed · fail) are Free. Total spend is capped by <code className="text-[11px] font-mono text-foreground/65">budget_cents</code> (default 0 = no budget guard) and max_iterations (≤ 1000). Test-mode runs bill 0.
+              </span>
+            </div>
+          </div>
+        </Section>
+      </div>
+
+      <SectionDivider />
+
+      {/* ─── Agents: Task Runs ─── */}
+      <div className="py-8 mb-8">
+        <Section
+          id="agents-runs"
+          title="Task Runs"
+          icon={Lightning}
+          description="POST /v1/runs starts a durable run and returns status 'queued' plus a one-time webhook_secret (only when you pass webhook_url). Idempotency-Key makes retries safe. Resume only works while status == awaiting_human."
+        >
+          <GuideCodeBlock label={`start a run — ${lang}`} code={RUNS_SNIPPETS[lang].create} />
+
+          <div className="mt-5 grid grid-cols-1 lg:grid-cols-2 gap-5">
+            {/* Request body */}
+            <div className="rounded-xl border border-foreground/[0.06] bg-foreground/[0.01] overflow-hidden">
+              <div className="px-5 py-2.5 bg-foreground/[0.02] border-b border-foreground/[0.04]">
+                <span className="text-[10px] font-semibold text-muted-foreground/35 uppercase tracking-wider">Request Body</span>
+              </div>
+              <div className="divide-y divide-foreground/[0.03]">
+                {[
+                  { f: "machine_id",         t: "uuid",                 req: true },
+                  { f: "task",               t: "string",               req: true },
+                  { f: "cua_version",        t: '"v3" | "v4" | "v1" (8 cr/step)', req: false },
+                  { f: "max_steps",          t: "int (1-1000)",         req: false },
+                  { f: "on_awaiting_human",  t: '"pause"|"fail"|"cancel"', req: false },
+                  { f: "webhook_url",        t: "string (https)",       req: false },
+                ].map(row => (
+                  <div key={row.f} className="flex items-center gap-3 px-5 py-2.5">
+                    <code className="text-[11px] font-mono font-semibold text-foreground/65 w-36 shrink-0 truncate">{row.f}</code>
+                    <span className="text-[11px] font-mono text-muted-foreground/30 flex-1 truncate">{row.t}</span>
+                    {row.req && <span className="text-[9px] font-semibold text-rose-500/50 shrink-0 uppercase tracking-wider">required</span>}
+                  </div>
+                ))}
+              </div>
+              <div className="px-5 py-3 text-[10px] text-muted-foreground/45 leading-relaxed border-t border-foreground/[0.04]">
+                Header <code className="text-[10px] font-mono">Idempotency-Key</code> (≤ 128 chars) makes a retried POST return the original run.
+                <code className="text-[10px] font-mono"> webhook_secret</code> is returned ONCE on create, so store it; it is <code className="text-[10px] font-mono">null</code> on get/list.
+              </div>
+            </div>
+
+            {/* Response */}
+            <GuideCodeBlock
+              label="POST /v1/runs — 201 response"
+              code={`{
+  "id": "...",
+  "status": "queued",
+  "machine_id": "550e8400-...",
+  "task": "Open the invoice ...",
+  "cua_version": "v3",
+  "max_steps": 40,
+  "on_awaiting_human": "pause",
+  "step_count": 0,
+  "awaiting_human_reason": null,
+  "result": null,
+  "error": null,
+  "created_at": "2026-06-08T17:00:00Z",
+  "usage": { "credits_charged": 0, "cost_cents": 0 },
+  "webhook_secret": "whsec_shown_once"
+}`}
+            />
+          </div>
+
+          <div className="mt-5 rounded-xl border border-foreground/[0.06] bg-foreground/[0.01] overflow-hidden">
+            <div className="px-5 py-2.5 bg-foreground/[0.02] border-b border-foreground/[0.04]">
+              <span className="text-[10px] font-semibold text-muted-foreground/35 uppercase tracking-wider">Status Lifecycle</span>
+            </div>
+            <div className="px-5 py-4">
+              <code className="text-[11px] font-mono text-foreground/60 leading-relaxed">
+                queued → running → (awaiting_human ⇄ running) → succeeded | failed | cancelled | timed_out
+              </code>
+              <p className="mt-3 text-[11px] text-muted-foreground/45 leading-relaxed">
+                <code className="text-[10px] font-mono">awaiting_human</code> is only reached when <code className="text-[10px] font-mono">on_awaiting_human == &quot;pause&quot;</code>.
+                Terminal states are immutable. <code className="text-[10px] font-mono">POST /v1/runs/{"{id}"}/resume</code> is valid <span className="text-foreground/60">only</span> while awaiting a human (otherwise 409 <code className="text-[10px] font-mono">NOT_AWAITING_HUMAN</code>).
+                <code className="text-[10px] font-mono"> POST /v1/runs/{"{id}"}/cancel</code> works at any non-terminal state.
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-5 grid grid-cols-1 md:grid-cols-2 gap-5">
+            <GuideCodeBlock label={`cancel + resume — ${lang}`} code={RUNS_SNIPPETS[lang].resume} />
+            <GuideCodeBlock
+              label="GET /v1/runs — list (filterable)"
+              code={`GET /v1/runs?status=running&limit=20
+X-API-Key: sk-coasty-live-...
+
+# Query params:
+#   status = queued|running|awaiting_human|succeeded
+#            |failed|cancelled|timed_out   (else 400 INVALID_STATUS_FILTER)
+#   limit  = 1..200                        (else 400 INVALID_LIMIT)
+#
+# GET /v1/runs/{id} fetches one run (404 RUN_NOT_FOUND if not yours).`}
+            />
+          </div>
+        </Section>
+      </div>
+
+      <SectionDivider />
+
+      {/* ─── Agents: Run Events & Webhooks ─── */}
+      <div className="py-8 mb-8">
+        <Section
+          id="agents-runs-events"
+          title="Run Events & Webhooks"
+          icon={Terminal}
+          description="Stream lifecycle live over SSE, or receive HMAC-signed lifecycle webhooks. Both let you react the instant a run needs a human or finishes."
+        >
+          <GuideCodeBlock label={`stream events (SSE) — ${lang}`} code={RUNS_SNIPPETS[lang].events} />
+
+          <div className="mt-5 grid grid-cols-1 md:grid-cols-2 gap-5">
+            {/* SSE notes */}
+            <div className="rounded-xl border border-foreground/[0.06] bg-foreground/[0.01] overflow-hidden">
+              <div className="px-5 py-2.5 bg-foreground/[0.02] border-b border-foreground/[0.04]">
+                <code className="text-[10px] font-mono text-muted-foreground/45">GET /v1/runs/{"{id}"}/events</code>
+              </div>
+              <div className="px-5 py-3 text-[11px] text-muted-foreground/55 leading-relaxed space-y-2">
+                <p>Server-Sent Events. With <code className="text-[10px] font-mono">curl</code>, pass <code className="text-[10px] font-mono">-N</code> to disable buffering so frames arrive live.</p>
+                <p>Each frame has an <code className="text-[10px] font-mono">id:</code> (monotonic seq). Reconnect with <code className="text-[10px] font-mono">Last-Event-ID: &lt;seq&gt;</code> (or <code className="text-[10px] font-mono">?after=&lt;seq&gt;</code>) to replay everything after that point, with no gaps on a dropped socket.</p>
+                <p>Event names: <code className="text-[10px] font-mono">status</code> · <code className="text-[10px] font-mono">step</code> · <code className="text-[10px] font-mono">awaiting_human</code> · <code className="text-[10px] font-mono">billing</code> · terminal.</p>
+              </div>
+            </div>
+
+            {/* Webhook signing */}
+            <div className="rounded-xl border border-foreground/[0.06] bg-foreground/[0.01] overflow-hidden">
+              <div className="px-5 py-2.5 bg-foreground/[0.02] border-b border-foreground/[0.04]">
+                <span className="text-[10px] font-semibold text-muted-foreground/35 uppercase tracking-wider">Lifecycle Webhooks (HMAC)</span>
+              </div>
+              <div className="px-5 py-3 text-[11px] text-muted-foreground/55 leading-relaxed space-y-2">
+                <p>Pass <code className="text-[10px] font-mono">webhook_url</code> on create (HTTPS only) and Coasty POSTs a signed payload on every lifecycle transition.</p>
+                <p>Verify with the per-run <code className="text-[10px] font-mono">webhook_secret</code> (returned once):</p>
+                <code className="block text-[10px] font-mono text-foreground/60 leading-relaxed bg-foreground/[0.02] rounded-md px-3 py-2">
+                  Coasty-Signature: t=&lt;ts&gt;,v1=&lt;hex&gt;<br />
+                  v1 = HMAC-SHA256(secret, &quot;&lt;t&gt;.&lt;body&gt;&quot;)
+                </code>
+                <p>Events: <code className="text-[10px] font-mono">run.awaiting_human</code> · <code className="text-[10px] font-mono">run.succeeded</code> · <code className="text-[10px] font-mono">run.failed</code> · <code className="text-[10px] font-mono">run.cancelled</code> · <code className="text-[10px] font-mono">run.timed_out</code>.</p>
+              </div>
+            </div>
+          </div>
+        </Section>
+      </div>
+
+      <SectionDivider />
+
+      {/* ─── Agents: Workflows & DSL ─── */}
+      <div className="py-8 mb-8">
+        <Section
+          id="agents-workflows"
+          title="Workflows & DSL"
+          icon={CursorClick}
+          description="A versioned JSON DSL composing many runs with branching, loops, parallelism, asserts, retries, and human approvals. {{var}} references pull from earlier steps' results."
+        >
+          <GuideCodeBlock label={`create a workflow — ${lang}`} code={WORKFLOWS_SNIPPETS[lang].create} />
+
+          <div className="mt-5 grid grid-cols-1 lg:grid-cols-2 gap-5">
+            {/* Step types */}
+            <div className="rounded-xl border border-foreground/[0.06] bg-foreground/[0.01] overflow-hidden">
+              <div className="px-5 py-2.5 bg-foreground/[0.02] border-b border-foreground/[0.04]">
+                <span className="text-[10px] font-semibold text-muted-foreground/35 uppercase tracking-wider">Step Types</span>
+              </div>
+              <div className="divide-y divide-foreground/[0.03]">
+                {[
+                  { c: "task",           d: "Run an agent task. Binds result via save_as + step id." },
+                  { c: "assert",         d: "Fail the workflow unless a condition holds." },
+                  { c: "if",             d: "Branch on a condition: then / else." },
+                  { c: "loop",           d: "Repeat a body (count, or while a condition)." },
+                  { c: "parallel",       d: "Run independent branches concurrently." },
+                  { c: "human_approval", d: "Pause for a human to approve / reject." },
+                  { c: "retry",          d: "Retry a body on failure." },
+                  { c: "succeed",        d: "Finish successfully with optional output." },
+                  { c: "fail",           d: "Finish as failed with a message." },
+                ].map(row => (
+                  <div key={row.c} className="flex items-center gap-3 px-5 py-2.5">
+                    <code className="text-[11px] font-mono font-semibold text-foreground/65 w-28 shrink-0 truncate">{row.c}</code>
+                    <span className="text-[11px] text-muted-foreground/45 flex-1 truncate">{row.d}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="px-5 py-3 text-[10px] text-muted-foreground/45 leading-relaxed border-t border-foreground/[0.04]">
+                Only <code className="text-[10px] font-mono">task</code> steps bill — 5 cr ($0.05) on v3/v4, 8 cr ($0.08) on v1. All other step types are Free.
+              </div>
+            </div>
+
+            {/* Conditions + limits */}
+            <div className="space-y-5">
+              <div className="rounded-xl border border-foreground/[0.06] bg-foreground/[0.01] overflow-hidden">
+                <div className="px-5 py-2.5 bg-foreground/[0.02] border-b border-foreground/[0.04]">
+                  <span className="text-[10px] font-semibold text-muted-foreground/35 uppercase tracking-wider">Condition Ops</span>
+                </div>
+                <div className="px-5 py-3 flex flex-wrap gap-1.5">
+                  {["eq", "ne", "lt", "gt", "lte", "gte", "contains", "truthy", "falsy", "exists", "and", "or", "not"].map(op => (
+                    <code key={op} className="text-[10px] font-mono text-foreground/55 px-1.5 py-0.5 rounded bg-foreground/[0.025]">{op}</code>
+                  ))}
+                  <p className="w-full mt-2 text-[10px] text-muted-foreground/45 leading-relaxed">
+                    Structured + injection-safe (no free-text eval). <code className="text-[10px] font-mono">and</code>/<code className="text-[10px] font-mono">or</code> take <code className="text-[10px] font-mono">conditions: [...]</code>; <code className="text-[10px] font-mono">not</code> takes a single <code className="text-[10px] font-mono">condition</code>.
+                  </p>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-foreground/[0.06] bg-foreground/[0.01] overflow-hidden">
+                <div className="px-5 py-2.5 bg-foreground/[0.02] border-b border-foreground/[0.04]">
+                  <span className="text-[10px] font-semibold text-muted-foreground/35 uppercase tracking-wider">Validation Limits</span>
+                </div>
+                <div className="divide-y divide-foreground/[0.03]">
+                  {[
+                    { r: "Max steps",          c: "200" },
+                    { r: "Max nesting depth",  c: "8 levels" },
+                    { r: "Max parallel branches", c: "16" },
+                  ].map(row => (
+                    <div key={row.r} className="flex items-center gap-3 px-5 py-2.5">
+                      <span className="text-[11px] text-muted-foreground/55 flex-1 truncate">{row.r}</span>
+                      <code className="text-[10px] font-mono text-foreground/55 shrink-0">{row.c}</code>
+                    </div>
+                  ))}
+                </div>
+                <div className="px-5 py-3 text-[10px] text-muted-foreground/45 leading-relaxed border-t border-foreground/[0.04]">
+                  <code className="text-[10px] font-mono">human_approval</code>, <code className="text-[10px] font-mono">succeed</code>, and <code className="text-[10px] font-mono">fail</code> are not allowed inside a <code className="text-[10px] font-mono">parallel</code> branch.
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-5">
+            <GuideCodeBlock label={`run a workflow — ${lang}`} code={WORKFLOWS_SNIPPETS[lang].run} />
+          </div>
+        </Section>
+      </div>
+
+      <SectionDivider />
+
+      {/* ─── Agents: Endpoint reference ─── */}
+      <div className="py-8 mb-8">
+        <Section
+          id="agents-endpoints"
+          title="Agents Endpoints"
+          icon={ListBullets}
+          description="Full reference for runs + workflows. All require X-API-Key (or Authorization: Bearer). POST runs/workflows accept an Idempotency-Key."
+        >
+          <div className="rounded-xl border border-foreground/[0.06] bg-foreground/[0.01] overflow-hidden">
+            {/* Group: Task Runs */}
+            <div className="px-5 py-2.5 bg-foreground/[0.02] border-b border-foreground/[0.04]">
+              <span className="text-[10px] font-semibold text-muted-foreground/35 uppercase tracking-wider">Task Runs</span>
+            </div>
+            <div className="divide-y divide-foreground/[0.03]">
+              {[
+                { m: "POST", p: "/v1/runs",                d: "Start a run (runs:write)",         c: "5–8 cr/step" },
+                { m: "GET",  p: "/v1/runs",                d: "List runs (runs:read)",            c: "Free" },
+                { m: "GET",  p: "/v1/runs/{id}",           d: "Get a run (runs:read)",            c: "Free" },
+                { m: "GET",  p: "/v1/runs/{id}/events",    d: "SSE stream (runs:read)",           c: "Free" },
+                { m: "POST", p: "/v1/runs/{id}/cancel",    d: "Cancel (runs:write)",              c: "Free" },
+                { m: "POST", p: "/v1/runs/{id}/resume",    d: "Resume when awaiting_human",       c: "Free" },
+              ].map(row => (
+                <div key={`${row.m} ${row.p}`} className="flex items-center gap-3 px-5 py-3">
+                  <span className={cn(
+                    "shrink-0 w-14 text-center text-[10px] font-bold tracking-wider py-0.5 rounded",
+                    row.m === "GET"  ? "bg-blue-500/10 text-blue-600 dark:text-blue-400" :
+                                       "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                  )}>
+                    {row.m}
+                  </span>
+                  <code className="text-[11px] font-mono text-foreground/60 flex-1 truncate">{row.p}</code>
+                  <span className="text-[11px] text-muted-foreground/35 hidden sm:block w-52 truncate">{row.d}</span>
+                  <span className="text-[10px] font-mono text-muted-foreground/30 w-20 text-right shrink-0">{row.c}</span>
+                </div>
+              ))}
+            </div>
+
+            {/* Group: Workflows */}
+            <div className="px-5 py-2.5 bg-foreground/[0.02] border-y border-foreground/[0.04]">
+              <span className="text-[10px] font-semibold text-muted-foreground/35 uppercase tracking-wider">Workflows</span>
+            </div>
+            <div className="divide-y divide-foreground/[0.03]">
+              {[
+                { m: "POST",   p: "/v1/workflows",                  d: "Create (workflows:write)",        c: "Free" },
+                { m: "GET",    p: "/v1/workflows",                  d: "List (workflows:read)",           c: "Free" },
+                { m: "GET",    p: "/v1/workflows/{id}",             d: "Get (workflows:read)",            c: "Free" },
+                { m: "PUT",    p: "/v1/workflows/{id}",             d: "Update — bumps version",          c: "Free" },
+                { m: "DELETE", p: "/v1/workflows/{id}",             d: "Archive a workflow",              c: "Free" },
+                { m: "POST",   p: "/v1/workflows/{id}/runs",        d: "Run a saved workflow",            c: "5–8 cr/step" },
+                { m: "POST",   p: "/v1/workflows/runs",             d: "Ad-hoc inline definition",        c: "5–8 cr/step" },
+                { m: "GET",    p: "/v1/workflows/runs",             d: "List workflow runs",              c: "Free" },
+                { m: "GET",    p: "/v1/workflows/runs/{id}",        d: "Get a workflow run",              c: "Free" },
+                { m: "GET",    p: "/v1/workflows/runs/{id}/events", d: "SSE stream (Last-Event-ID)",      c: "Free" },
+                { m: "POST",   p: "/v1/workflows/runs/{id}/cancel", d: "Cancel a workflow run",           c: "Free" },
+                { m: "POST",   p: "/v1/workflows/runs/{id}/resume", d: "Approve/reject a paused step",    c: "Free" },
+              ].map(row => (
+                <div key={`${row.m} ${row.p}`} className="flex items-center gap-3 px-5 py-3">
+                  <span className={cn(
+                    "shrink-0 w-14 text-center text-[10px] font-bold tracking-wider py-0.5 rounded",
+                    row.m === "GET"    ? "bg-blue-500/10 text-blue-600 dark:text-blue-400" :
+                    row.m === "POST"   ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" :
+                    row.m === "PUT"    ? "bg-violet-500/10 text-violet-600 dark:text-violet-400" :
+                                         "bg-rose-500/10 text-rose-600 dark:text-rose-400"
+                  )}>
+                    {row.m}
+                  </span>
+                  <code className="text-[11px] font-mono text-foreground/60 flex-1 truncate">{row.p}</code>
+                  <span className="text-[11px] text-muted-foreground/35 hidden sm:block w-52 truncate">{row.d}</span>
+                  <span className="text-[10px] font-mono text-muted-foreground/30 w-20 text-right shrink-0">{row.c}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </Section>
+      </div>
+
+      <SectionDivider />
+
+      {/* ════════════════════════════════════════════════════════════════════
            ════════════════ SCHEDULES API ════════════════
            Cron, run-once (run_at), webhook + email + chain triggers, and
            a public unauthenticated webhook fire endpoint with HMAC verify.
@@ -2124,10 +2990,11 @@ Returns:
               </div>
               <div className="divide-y divide-foreground/[0.03]">
                 {[
-                  { r: "Schedule create",                  c: "20 cr min" },
-                  { r: "Per fire (agent run)",             c: "10 cr/min" },
-                  { r: "Webhook fire (routing)",           c: "1 cr / 200" },
-                  { r: "Email fire (routing)",             c: "1 cr / 10" },
+                  { r: "Schedule create — wallet gate, no fee",      c: "20 cr ($0.20) min" },
+                  { r: "Fire / run-now — wallet gate, no fee",       c: "20 cr ($0.20) min" },
+                  { r: "Agent runtime per fire (credit balance)",    c: "10 cr/min" },
+                  { r: "Webhook fire — no routing fee (60/min limit)", c: "Free" },
+                  { r: "Email fire — no routing fee",              c: "Free" },
                   { r: "Chain trigger (no extra cost)",    c: "Free" },
                   { r: "Pause / resume / list / runs",     c: "Free" },
                   { r: "Sandbox (sk-coasty-test-*)",       c: "Free" },
@@ -2137,6 +3004,9 @@ Returns:
                     <code className="text-[10px] font-mono text-foreground/55 shrink-0">{row.c}</code>
                   </div>
                 ))}
+              </div>
+              <div className="px-5 py-3 text-[10px] text-muted-foreground/45 leading-relaxed border-t border-foreground/[0.04]">
+                Gates check your API wallet (1 cr = $0.01) but never charge it. Execution time is billed to your Coasty account credit balance — the same balance the app uses — at 10 credits/min, minimum 20 credits to start, max 6 h per session. Webhook fires charge no routing fee: they require the owner&apos;s wallet ≥ 20 cr ($0.20) and are rate-limited (default 60/min per webhook). Test schedules record credits_charged: 0.
               </div>
             </div>
           </div>
@@ -2248,7 +3118,7 @@ X-API-Key: sk-coasty-live-...
               </div>
               <div className="px-5 py-3 text-[11px] text-muted-foreground/55 leading-relaxed">
                 Returns <code className="text-[10px] font-mono">webhook_url</code> + <code className="text-[10px] font-mono">webhook_secret</code> (whsec_64hex). Sign every fire with
-                <code className="text-[10px] font-mono"> HMAC-SHA256(secret, "{"{ts}"}.body")</code> and send <code className="text-[10px] font-mono">Coasty-Signature: t={"{ts}"},v1={"{sig}"}</code>.
+                <code className="text-[10px] font-mono"> HMAC-SHA256(secret, &quot;{"{ts}"}.body&quot;)</code> and send <code className="text-[10px] font-mono">Coasty-Signature: t={"{ts}"},v1={"{sig}"}</code>.
                 Replay window 5 min. Idempotent on identical (id, body) within 60 s.
               </div>
             </div>
@@ -2380,14 +3250,14 @@ X-Coasty-Webhook-Deduplicated: false
             </div>
             <div className="divide-y divide-foreground/[0.03]">
               {[
-                { m: "POST",   p: "/v1/schedules",                d: "Create",                        c: "20 cr min" },
+                { m: "POST",   p: "/v1/schedules",                d: "Create (wallet gate, no fee)",  c: "20 cr gate" },
                 { m: "GET",    p: "/v1/schedules",                d: "List schedules",                c: "Free" },
                 { m: "GET",    p: "/v1/schedules/{id}",           d: "Get",                            c: "Free" },
                 { m: "PATCH",  p: "/v1/schedules/{id}",           d: "Update (partial)",               c: "Free" },
                 { m: "DELETE", p: "/v1/schedules/{id}",           d: "Soft-delete",                    c: "Free" },
                 { m: "POST",   p: "/v1/schedules/{id}/pause",     d: "Pause future runs",              c: "Free" },
                 { m: "POST",   p: "/v1/schedules/{id}/resume",    d: "Resume future runs",             c: "Free" },
-                { m: "POST",   p: "/v1/schedules/{id}/run",       d: "Manual fire (idempotent)",       c: "10 cr/min" },
+                { m: "POST",   p: "/v1/schedules/{id}/run",       d: "Manual fire (runtime 10 cr/min*)", c: "20 cr gate" },
               ].map(row => (
                 <div key={`${row.m} ${row.p}`} className="flex items-center gap-3 px-5 py-3">
                   <span className={cn(
@@ -2434,7 +3304,7 @@ X-Coasty-Webhook-Deduplicated: false
                 { m: "POST",   p: "/v1/schedules/{id}/triggers",                d: "Add (webhook | email | chain)",  c: "Free" },
                 { m: "DELETE", p: "/v1/schedules/{id}/triggers/{trigger_id}",   d: "Remove",                          c: "Free" },
                 { m: "POST",   p: "/v1/triggers/email-mailbox",                 d: "Provision inbound mailbox",      c: "Free" },
-                { m: "POST",   p: "/v1/triggers/webhook/{webhook_id}",          d: "Public fire (HMAC, no auth)",    c: "1 cr / 200" },
+                { m: "POST",   p: "/v1/triggers/webhook/{webhook_id}",          d: "Public fire (HMAC, no auth; 60/min, 20 cr wallet gate)", c: "Free" },
               ].map(row => (
                 <div key={`${row.m} ${row.p}`} className="flex items-center gap-3 px-5 py-3">
                   <span className={cn(
@@ -2476,7 +3346,7 @@ X-Coasty-Webhook-Deduplicated: false
                 MCP (Model Context Protocol) is the open standard, designed by Anthropic and adopted across
                 the agent ecosystem, that lets LLM hosts plug into external tools and data.
                 Coasty&apos;s MCP server is a thin wrapper over the <code className="text-[11px] font-mono text-foreground/65">/v1</code> API —
-                same scopes, same rate limits, same billing. It runs locally via <code className="text-[11px] font-mono text-foreground/65">npx</code>;
+                same scopes, same billing. It runs locally via <code className="text-[11px] font-mono text-foreground/65">npx</code>;
                 your API key never touches a Coasty MCP relay.
               </p>
             </div>
@@ -2615,7 +3485,7 @@ claude mcp list
           id="mcp-tools"
           title="Tools the MCP server exposes"
           icon={ListBullets}
-          description="24 tools across Predict, Machines, Schedules, and Account. All carry MCP annotations (readOnly / destructive / idempotent) so well-behaved hosts confirm before destructive operations."
+          description="23 tools across Predict, Machines, Schedules, and Account. All carry MCP annotations (readOnly / destructive / idempotent) so well-behaved hosts confirm before destructive operations."
         >
           <div className="rounded-xl border border-foreground/[0.06] bg-foreground/[0.01] overflow-hidden">
             {[
@@ -2624,7 +3494,6 @@ claude mcp list
                 tools: [
                   { n: "coasty_predict",                   d: "Screenshot + goal → list of actions" },
                   { n: "coasty_ground",                    d: "Element description → (x, y) coords" },
-                  { n: "coasty_ocr",                       d: "Screenshot → text + bounding boxes" },
                   { n: "coasty_parse",                     d: "pyautogui code → structured actions (free)" },
                 ],
               },
@@ -2703,43 +3572,91 @@ claude mcp list
 
       {/* ════ Errors ════ */}
       <div className="py-8 mb-6">
-        <Section id="errors" title="Error Handling" icon={Eye} description="All errors return a JSON body with error.code, error.message, error.type, and error.request_id fields.">
-          <div className="rounded-xl border border-foreground/[0.06] bg-foreground/[0.01] overflow-hidden divide-y divide-foreground/[0.04]">
+        <Section id="errors" title="Error Handling" icon={Eye} description="Every error returns the same envelope and an X-Coasty-Request-Id header. The code is stable; the message is for humans. Use code + status to branch.">
+          {/* Envelope shape */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+            <GuideCodeBlock
+              label="error envelope — every failed request"
+              code={`{
+  "error": {
+    "code": "INSUFFICIENT_SCOPE",
+    "message": "This key lacks the scope this route requires.",
+    "type": "forbidden",
+    "request_id": "req_8f2c1e9a",
+    "suggestion": "Re-mint the key with runs:write at /developers.",
+    "docs_url": "https://coasty.ai/api-docs#errors",
+    "required_scope": "runs:write",        // extra context varies by code
+    "current_scopes": ["runs:read"]
+  }
+}`}
+            />
+            <div className="rounded-xl border border-foreground/[0.06] bg-foreground/[0.01] overflow-hidden">
+              <div className="px-5 py-2.5 bg-foreground/[0.02] border-b border-foreground/[0.04]">
+                <span className="text-[10px] font-semibold text-muted-foreground/35 uppercase tracking-wider">Always present</span>
+              </div>
+              <div className="px-5 py-4 text-[11px] text-muted-foreground/55 leading-relaxed space-y-2">
+                <p>Body fields: <code className="text-[10px] font-mono">code</code>, <code className="text-[10px] font-mono">message</code>, <code className="text-[10px] font-mono">type</code>, <code className="text-[10px] font-mono">request_id</code>, <code className="text-[10px] font-mono">suggestion</code>, <code className="text-[10px] font-mono">docs_url</code>, plus code-specific context (e.g. <code className="text-[10px] font-mono">required_scope</code>, <code className="text-[10px] font-mono">balance</code>, <code className="text-[10px] font-mono">details</code>).</p>
+                <p>Headers: <code className="text-[10px] font-mono">X-Coasty-Request-Id</code> (quote it in support tickets) and <code className="text-[10px] font-mono">Link: &lt;docs_url&gt;; rel=&quot;help&quot;</code>.</p>
+                <p>Auth failures also send <code className="text-[10px] font-mono">WWW-Authenticate: Bearer</code>; transient errors (timeouts, upstream outages) send <code className="text-[10px] font-mono">Retry-After</code>.</p>
+                <p>Auto-refunded codes (<code className="text-[10px] font-mono">PREDICTION_FAILED</code>, <code className="text-[10px] font-mono">GROUNDING_FAILED</code>) refund the charge, so you are not billed for a failed model call.</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Troubleshooting: the 5 most common first-week mistakes */}
+          <div className="mt-6 rounded-xl border border-amber-500/15 bg-amber-500/[0.03] overflow-hidden">
+            <div className="px-5 py-2.5 bg-amber-500/[0.04] border-b border-amber-500/15">
+              <span className="text-[10px] font-semibold text-amber-600/80 dark:text-amber-400/80 uppercase tracking-wider">Troubleshooting: first-week mistakes</span>
+            </div>
+            <div className="divide-y divide-amber-500/10">
+              {[
+                { code: "401", t: "Auth header wrong", f: "Send your key as X-API-Key OR Authorization: Bearer, but never paste the literal \"Bearer \" prefix into the X-API-Key value." },
+                { code: "402", t: "Out of credits", f: "Add funds, or develop against a sk-coasty-test- key. Test keys never bill and use mock VMs." },
+                { code: "403", t: "Missing scope", f: "The key is valid but lacks the route's scope. Re-mint it with the needed scope at /developers; old keys are not upgraded in place." },
+                { code: "422", t: "Bad screenshot / missing field", f: "Strip any data: URI prefix before base64; error.details carries the exact failing field path." },
+              ].map(row => (
+                <div key={row.code} className="flex items-start gap-4 px-5 py-3.5">
+                  <span className="text-[11px] font-mono font-bold text-amber-600/70 dark:text-amber-400/70 w-8 shrink-0 mt-0.5">{row.code}</span>
+                  <div className="flex-1">
+                    <div className="text-[12px] font-semibold text-foreground/70">{row.t}</div>
+                    <div className="text-[11.5px] text-muted-foreground/55 leading-relaxed mt-0.5">{row.f}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Full catalog */}
+          <div className="mt-6 rounded-xl border border-foreground/[0.06] bg-foreground/[0.01] overflow-hidden divide-y divide-foreground/[0.04]">
             {[
-              { code: "400", name: "INVALID_MACHINE_ID",    desc: "Path id is not a UUID or mch_test_<hex>" },
-              { code: "400", name: "INVALID_IDEMPOTENCY_KEY", desc: "Idempotency-Key has bad chars or > 128 chars" },
-              { code: "400", name: "UNKNOWN_BROWSER_OP",    desc: "Unknown {op} in /browser/{op}" },
-              { code: "400", name: "UNKNOWN_FILE_OP",       desc: "Unknown {op} in /files/{op}" },
-              { code: "401", name: "INVALID_API_KEY",       desc: "Missing or invalid X-API-Key / Bearer token" },
-              { code: "402", name: "INSUFFICIENT_CREDITS",  desc: "Balance below required amount (provision needs ≥ 20 cr)" },
-              { code: "403", name: "INSUFFICIENT_SCOPE",    desc: "API key lacks the required scope for this op" },
-              { code: "404", name: "NOT_FOUND",             desc: "Machine/session not found OR not owned by your key" },
-              { code: "409", name: "INVALID_STATE",         desc: "Action requires status='running'; lifecycle has illegal transition" },
-              { code: "422", name: "IDEMPOTENCY_KEY_REUSED", desc: "Same Idempotency-Key sent with a different request body" },
-              { code: "422", name: "VALIDATION_ERROR",      desc: "Body fails Pydantic — unknown field, wrong type, oversize, bad command" },
-              { code: "429", name: "RATE_LIMIT_EXCEEDED",   desc: "Too many requests — see Retry-After header" },
-              { code: "429", name: "TEST_MACHINE_LIMIT",    desc: "Sandbox keys are capped at 5 mock VMs" },
-              { code: "502", name: "SCREENSHOT_FAILED",     desc: "Screenshot dispatch reached the VM but capture errored" },
-              { code: "503", name: "DB_UNAVAILABLE",        desc: "Backend cannot reach Supabase" },
-              { code: "504", name: "UPSTREAM_TIMEOUT",      desc: "Provision proxy timed out (try Idempotency-Key + retry)" },
-              // Schedules + triggers
-              { code: "400", name: "INVALID_SCHEDULE_ID",   desc: "schedule_id is not a UUID or sch_test_<hex>" },
-              { code: "400", name: "INVALID_TRIGGER_ID",    desc: "trigger_id is not 'trg_<hex>'" },
-              { code: "400", name: "INVALID_RUN_ID",        desc: "run_id contains non-allowlisted chars" },
-              { code: "400", name: "INVALID_LIMIT",         desc: "limit must be 1..200" },
-              { code: "400", name: "INVALID_STATUS_FILTER", desc: "Unknown ?status= value on /runs" },
-              { code: "400", name: "EMPTY_UPDATE",          desc: "PATCH body has no fields" },
-              { code: "401", name: "INVALID_SIGNATURE",     desc: "Missing/malformed/stale/tampered Coasty-Signature" },
-              { code: "404", name: "SOURCE_SCHEDULE_NOT_FOUND", desc: "Chain trigger source not owned by your key" },
-              { code: "404", name: "RUN_NOT_FOUND",         desc: "Run id not in this schedule's history" },
-              { code: "410", name: "WEBHOOK_DISABLED",      desc: "Webhook trigger has been disabled by the owner" },
-              { code: "429", name: "TEST_SCHEDULE_LIMIT",   desc: "Sandbox keys are capped at 10 mock schedules" },
-              { code: "429", name: "SCHEDULE_LIMIT_REACHED", desc: "Per-tier slot limit (free:3 / pro:10 / enterprise:50)" },
+              { code: "400", name: "INVALID_LIMIT",          desc: "limit query param out of range; must be 1..200" },
+              { code: "400", name: "INVALID_STATUS_FILTER",  desc: "Unknown ?status= value on a list endpoint" },
+              { code: "400", name: "FEATURE_NOT_AVAILABLE",  desc: "The feature is gated off for your tier or this mode" },
+              { code: "401", name: "INVALID_API_KEY",        desc: "Missing/invalid key. Send X-API-Key OR Authorization: Bearer (sends WWW-Authenticate). Don't paste \"Bearer \" into X-API-Key" },
+              { code: "402", name: "INSUFFICIENT_CREDITS",   desc: "Wallet below required (returns required + balance). Add funds, or use a sk-coasty-test- key" },
+              { code: "402", name: "WALLET_EXHAUSTED",       desc: "The API wallet hit zero mid-request" },
+              { code: "403", name: "INSUFFICIENT_SCOPE",     desc: "Key valid but lacks scope (returns required_scope + current_scopes). Re-mint at /developers" },
+              { code: "404", name: "NOT_FOUND",              desc: "Resource id does not exist or isn't yours" },
+              { code: "404", name: "SESSION_NOT_FOUND",      desc: "Session id unknown (mode-isolated; test ids never match live)" },
+              { code: "404", name: "RUN_NOT_FOUND",          desc: "Run id unknown or not owned by your key (mode-isolated)" },
+              { code: "404", name: "WORKFLOW_NOT_FOUND",     desc: "Workflow id unknown or not owned by your key (mode-isolated)" },
+              { code: "409", name: "INVALID_STATE",          desc: "Illegal transition (returns current_state + allowed_from)" },
+              { code: "409", name: "NOT_AWAITING_HUMAN",     desc: "Resumed a run/step that wasn't paused for a human" },
+              { code: "409", name: "RESUME_CONFLICT",        desc: "Two resumes raced; only the first wins" },
+              { code: "409", name: "IDEMPOTENCY_KEY_REUSED", desc: "Same Idempotency-Key reused with a different request body" },
+              { code: "413", name: "PAYLOAD_TOO_LARGE",      desc: "Base64 body over the 10 MB cap" },
+              { code: "422", name: "VALIDATION_ERROR",       desc: "Body failed validation; error.details = field path that failed" },
+              { code: "422", name: "INVALID_SCREENSHOT",     desc: "Screenshot not valid base64; strip the data: prefix first" },
+              { code: "500", name: "INTERNAL_ERROR",         desc: "Unexpected server error; retry, and quote the request_id if it persists" },
+              { code: "500", name: "PREDICTION_FAILED",      desc: "Model run failed; the charge is auto-refunded" },
+              { code: "500", name: "GROUNDING_FAILED",       desc: "Grounding failed; auto-refunded" },
+              { code: "503", name: "UPSTREAM_UNAVAILABLE",   desc: "A dependency is down; retry with backoff" },
+              { code: "504", name: "UPSTREAM_TIMEOUT",       desc: "Upstream timed out; retry (use Idempotency-Key on POSTs)" },
             ].map((row, i) => (
-              <div key={`${row.name}-${i}`} className="flex items-center gap-4 px-5 py-3.5">
-                <span className="text-[11px] font-mono font-bold text-muted-foreground/35 w-8 shrink-0">{row.code}</span>
+              <div key={`${row.name}-${i}`} className="flex items-start gap-4 px-5 py-3.5">
+                <span className="text-[11px] font-mono font-bold text-muted-foreground/35 w-8 shrink-0 mt-0.5">{row.code}</span>
                 <code className="text-[11px] font-mono text-foreground/60 w-52 shrink-0 truncate">{row.name}</code>
-                <span className="text-[12px] text-muted-foreground/45 flex-1">{row.desc}</span>
+                <span className="text-[12px] text-muted-foreground/45 flex-1 leading-relaxed">{row.desc}</span>
               </div>
             ))}
           </div>
